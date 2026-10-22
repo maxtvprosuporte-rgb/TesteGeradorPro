@@ -1,734 +1,272 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="pt-BR">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Monitor Financeiro de Vendas</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <meta charset="utf-8" />
+    <base href="./">
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="description" content="Banner Generator Pro - Filmes, Séries e Vídeos para WhatsApp" />
+    <title>Banner Generator Pro</title>
+
+    <script>window.addEventListener("error",function(e){if(e.error instanceof DOMException&&e.error.name==="DataCloneError"&&e.message&&e.message.includes("PerformanceServerTiming")){e.stopImmediatePropagation();e.preventDefault();}},true);</script>
+
+    <!-- Remove o service worker antigo (coi-serviceworker) de quem já tinha ele registrado.
+         Os headers COOP/COEP agora vêm direto do servidor, então ele não é mais necessário
+         e causava reloads/crashes de memória ao voltar ao site depois de um tempo. -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(regs) {
+                regs.forEach(function(reg) { reg.unregister(); });
+            }).catch(function() {});
+        }
+    </script>
+
+    <!-- Tailwind LOCAL (não depende de CDN externo - funciona em redes restritivas e 4G/5G fraco) -->
+    <script src="tailwind.js"></script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        body { font-family: 'Inter', sans-serif; -webkit-tap-highlight-color: transparent; }
-        .fade-in { animation: fadeIn 0.3s ease-out; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-        .custom-scrollbar::-webkit-scrollbar { height: 6px; width: 6px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f5f9; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        * { scrollbar-width: thin; scrollbar-color: #27272a #0f0f11; }
+        *::-webkit-scrollbar { width: 6px; }
+        *::-webkit-scrollbar-track { background: #0f0f11; }
+        *::-webkit-scrollbar-thumb { background-color: #27272a; border-radius: 3px; }
+        body { font-family: 'Manrope', sans-serif; background: #050505; margin: 0; }
+        .font-oswald { font-family: 'Oswald', sans-serif; }
+        .search-result:hover { background: linear-gradient(90deg, rgba(239,68,68,0.1) 0%, transparent 100%); }
+        .canvas-glow { box-shadow: 0 0 80px rgba(239,68,68,0.15), 0 25px 50px -12px rgba(0,0,0,0.8); }
+        select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3E%3Cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m6 8 4 4 4-4'/%3E%3C/svg%3E"); background-position: right 0.5rem center; background-repeat: no-repeat; background-size: 1.5em 1.5em; }
+        .box-selector { transition: all 0.3s ease; cursor: pointer; }
+        .box-selector:hover { transform: translateY(-5px); box-shadow: 0 20px 40px rgba(0,0,0,0.5); }
+        .modal { display: none; position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.8); align-items: center; justify-content: center; }
+        .modal.active { display: flex; }
+        .spinner { border: 3px solid #27272a; border-top: 3px solid #a855f7; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .progress-bar { width: 0%; height: 4px; background: linear-gradient(90deg, #a855f7, #ec4899); transition: width 0.3s ease; }
+        .video-preview { max-width: 100%; max-height: 600px; border-radius: 8px; box-shadow: 0 0 40px rgba(168,85,247,0.3); }
+        input[type="time"], input[type="date"], select {
+            box-sizing: border-box !important;
+            max-width: 100% !important;
+            min-width: 0 !important;
+        }
+        input[type="time"]::-webkit-date-and-time-value { text-align: left; }
+        select { text-overflow: ellipsis; white-space: nowrap; overflow: hidden; }
     </style>
 </head>
-<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col">
-    
-    <!-- Navbar / Header -->
-    <header class="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center py-4 sm:py-0 h-auto sm:h-16 gap-4">
-                <div class="flex items-center gap-3">
-                    <div class="bg-indigo-600 p-2.5 rounded-xl shadow-sm">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                        </svg>
-                    </div>
-                    <div>
-                        <h1 class="text-xl font-bold text-slate-900 tracking-tight">Monitor Financeiro</h1>
-                        <p class="text-xs text-slate-500 font-medium">Vendas, comissões e salário estimado</p>
-                    </div>
-                </div>
-                <div class="flex items-center gap-3 w-full sm:w-auto">
-                    <button type="button" id="btnOpenConfig" class="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-slate-300 rounded-xl text-sm font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 transition-all shadow-sm active:scale-95">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                        </svg>
-                        <span class="sm:hidden">Config</span>
-                        <span class="hidden sm:inline">Configurar</span>
-                    </button>
-                    <button type="button" id="btnOpenReport" class="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 rounded-xl text-sm font-medium text-white hover:bg-indigo-700 transition-all shadow-sm hover:shadow-md active:scale-95">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
-                        </svg>
-                        Relatório
-                    </button>
-                </div>
-            </div>
-        </div>
-    </header>
+<body class="min-h-screen text-white">
 
-    <main class="flex-grow max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6 w-full">
-        
-        <!-- KPIs / Resumo (Agora com 7 Cards para melhor distribuição) -->
-        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-3 sm:gap-4">
-            <!-- Salário Estimado (Destaque) -->
-            <div class="bg-gradient-to-br from-indigo-600 to-indigo-700 p-4 sm:p-5 rounded-2xl border border-indigo-500 shadow-md hover:shadow-lg transition-shadow col-span-2 md:col-span-1 lg:col-span-2 xl:col-span-2 text-white">
-                <div class="flex items-center justify-between mb-2">
-                    <p class="text-xs sm:text-sm font-medium text-indigo-100">Salário Estimado</p>
-                    <div class="p-1.5 bg-indigo-500/50 rounded-lg">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 sm:h-5 sm:w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" />
-                        </svg>
-                    </div>
-                </div>
-                <p id="salarioEstimado" class="text-2xl sm:text-3xl font-bold text-white">R$ 0,00</p>
-                <p class="text-[10px] sm:text-xs text-indigo-200 mt-1 font-medium">Base + Benefícios + Comissão</p>
-            </div>
+    <button onclick="openSettings()" class="fixed top-6 right-6 z-50 w-12 h-12 bg-zinc-800 hover:bg-zinc-700 rounded-full flex items-center justify-center transition-all shadow-lg" title="Configurações" data-testid="settings-btn">
+        <svg class="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 256 256"><path d="M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm88-29.84q.06-2.16,0-4.32l14.92-18.64a8,8,0,0,0,1.48-7.06,107.21,107.21,0,0,0-10.88-26.25,8,8,0,0,0-6-3.93l-23.72-2.64q-1.48-1.56-3-3L186,40.54a8,8,0,0,0-3.94-6,107.71,107.71,0,0,0-26.25-10.87,8,8,0,0,0-7.06,1.49L130.16,40Q128,40,125.84,40L107.2,25.11a8,8,0,0,0-7.06-1.48A107.6,107.6,0,0,0,73.89,34.51a8,8,0,0,0-3.93,6L67.32,64.27q-1.56,1.49-3,3L40.54,70a8,8,0,0,0-6,3.94,107.71,107.71,0,0,0-10.87,26.25,8,8,0,0,0,1.49,7.06L40,125.84Q40,128,40,130.16L25.11,148.8a8,8,0,0,0-1.48,7.06,107.21,107.21,0,0,0,10.88,26.25,8,8,0,0,0,6,3.93l23.72,2.64q1.49,1.56,3,3L70,215.46a8,8,0,0,0,3.94,6,107.71,107.71,0,0,0,26.25,10.87,8,8,0,0,0,7.06-1.49L125.84,216q2.16.06,4.32,0l18.64,14.92a8,8,0,0,0,7.06,1.48,107.21,107.21,0,0,0,26.25-10.88,8,8,0,0,0,3.93-6l2.64-23.72q1.56-1.48,3-3L215.46,186a8,8,0,0,0,6-3.94,107.71,107.71,0,0,0,10.87-26.25,8,8,0,0,0-1.49-7.06Z"/></svg>
+    </button>
 
-            <!-- Total Vendido -->
-            <div class="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
-                <div class="flex items-center justify-between mb-2">
-                    <p class="text-xs sm:text-sm font-medium text-slate-500">Total Vendido</p>
-                    <div class="p-1.5 bg-blue-50 rounded-lg">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 sm:h-5 sm:w-5 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                    </div>
-                </div>
-                <p id="totalVendido" class="text-lg sm:text-2xl font-bold text-slate-900">R$ 0,00</p>
-                <div class="mt-2 w-full bg-slate-100 rounded-full h-1.5">
-                    <div id="progressBar" class="bg-blue-600 h-1.5 rounded-full transition-all duration-700 ease-out" style="width: 0%"></div>
-                </div>
-                <p id="percentualMeta" class="text-[10px] sm:text-xs text-slate-500 mt-1 font-medium">0% da meta</p>
-            </div>
-
-            <!-- Falta para Meta -->
-            <div class="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
-                <div class="flex items-center justify-between mb-2">
-                    <p class="text-xs sm:text-sm font-medium text-slate-500">Falta para Meta</p>
-                    <div class="p-1.5 bg-amber-50 rounded-lg">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 sm:h-5 sm:w-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                        </svg>
-                    </div>
-                </div>
-                <p id="saldoRestante" class="text-lg sm:text-2xl font-bold text-amber-600">R$ 0,00</p>
-                <p class="text-[10px] sm:text-xs text-slate-500 mt-1 font-medium">Para atingir o objetivo</p>
-            </div>
-
-            <!-- Comissão Total -->
-            <div class="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
-                <div class="flex items-center justify-between mb-2">
-                    <p class="text-xs sm:text-sm font-medium text-slate-500">Comissão</p>
-                    <div class="p-1.5 bg-emerald-50 rounded-lg">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 sm:h-5 sm:w-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                    </div>
-                </div>
-                <p id="totalComissao" class="text-lg sm:text-2xl font-bold text-emerald-700">R$ 0,00</p>
-                <p id="comissaoPercentualDisplay" class="text-[10px] sm:text-xs text-slate-500 mt-1 font-medium">0% sobre vendas</p>
-            </div>
-
-            <!-- Clientes Restantes Hoje (NOVO) -->
-            <div class="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
-                <div class="flex items-center justify-between mb-2">
-                    <p class="text-xs sm:text-sm font-medium text-slate-500">Clientes Restantes Hoje</p>
-                    <div class="p-1.5 bg-purple-50 rounded-lg">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 sm:h-5 sm:w-5 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0z" />
-                        </svg>
-                    </div>
-                </div>
-                <p id="clientesRestantesHoje" class="text-lg sm:text-2xl font-bold text-purple-600">0</p>
-                <p class="text-[10px] sm:text-xs text-slate-500 mt-1 font-medium">para meta diária</p>
-            </div>
-
-            <!-- Vendas Hoje -->
-            <div class="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
-                <div class="flex items-center justify-between mb-2">
-                    <p class="text-xs sm:text-sm font-medium text-slate-500">Vendas Hoje</p>
-                    <div class="p-1.5 bg-sky-50 rounded-lg">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 sm:h-5 sm:w-5 text-sky-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                        </svg>
-                    </div>
-                </div>
-                <p id="totalHoje" class="text-lg sm:text-2xl font-bold text-sky-600">R$ 0,00</p>
-                <p class="text-[10px] sm:text-xs text-slate-500 mt-1 font-medium">Foco no diário</p>
-            </div>
-
-            <!-- Meta Diária -->
-            <div class="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
-                <div class="flex items-center justify-between mb-2">
-                    <p class="text-xs sm:text-sm font-medium text-slate-500">Meta Diária</p>
-                    <div class="p-1.5 bg-slate-100 rounded-lg">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 sm:h-5 sm:w-5 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                        </svg>
-                    </div>
-                </div>
-                <p id="metaDiariaDisplay" class="text-lg sm:text-2xl font-bold text-slate-900">R$ 0,00</p>
-                <p class="text-[10px] sm:text-xs text-slate-500 mt-1 font-medium">Objetivo por dia</p>
-            </div>
-        </div>
-
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <!-- Formulário de Nova Venda -->
-            <div class="lg:col-span-1">
-                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm lg:sticky lg:top-24">
-                    <div class="p-5 border-b border-slate-100">
-                        <h2 class="text-base sm:text-lg font-semibold text-slate-900 flex items-center gap-2">
-                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                            Nova Venda
-                        </h2>
-                    </div>
-                    <form id="vendaForm" class="p-5 space-y-4">
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Data da Venda</label>
-                            <input type="date" id="vendaData" required class="w-full h-11 px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Valor (R$)</label>
-                            <input type="number" id="vendaValor" step="0.01" min="0.01" required class="w-full h-11 px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" placeholder="0,00">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Descrição / Cliente <span class="text-slate-400 font-normal">(Opcional)</span></label>
-                            <input type="text" id="vendaDescricao" class="w-full h-11 px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all" placeholder="Ex: Venda Produto X">
-                        </div>
-                        <button type="submit" id="btnAddVenda" class="w-full h-11 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-xl shadow-sm hover:shadow transition-all flex items-center justify-center gap-2 active:scale-[0.98]">
-                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-                            </svg>
-                            Registrar Venda
-                        </button>
-                    </form>
-                </div>
-            </div>
-
-            <!-- Histórico de Vendas -->
-            <div class="lg:col-span-2">
-                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-                    <div class="p-5 border-b border-slate-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                        <div>
-                            <h2 class="text-base sm:text-lg font-semibold text-slate-900 flex items-center gap-2">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                                </svg>
-                                Histórico
-                            </h2>
-                            <p class="text-xs sm:text-sm text-slate-500 mt-1">Gerencie suas vendas registradas</p>
-                        </div>
-                        <div class="flex items-center gap-3 w-full sm:w-auto">
-                            <span id="totalVendasCount" class="text-xs sm:text-sm font-medium text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg whitespace-nowrap">0 vendas</span>
-                            <button type="button" id="btnClearAll" class="text-xs sm:text-sm font-medium text-red-600 hover:text-red-700 hover:bg-red-50 px-3 py-1.5 rounded-lg transition-colors border border-transparent hover:border-red-100 whitespace-nowrap active:scale-95">
-                                Limpar tudo
-                            </button>
+    <div id="settingsModal" class="modal">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+            <header class="flex items-center justify-between mb-6">
+                <h2 class="font-oswald text-3xl font-bold">Configurações Globais</h2>
+                <button onclick="closeSettings()" class="text-zinc-500 hover:text-white transition-colors" data-testid="close-settings-btn">✕</button>
+            </header>
+            <div class="flex flex-col gap-6">
+                <section class="border border-yellow-700/40 rounded-lg p-5">
+                    <label class="text-sm font-semibold text-yellow-400 mb-2 block">Chaves da API TMDB (até 3)</label>
+                    <p class="text-xs text-zinc-500 mb-4">Necessárias para buscar filmes e séries. A chave é gratuita: crie sua conta em <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener" class="text-yellow-400 underline">themoviedb.org/settings/api</a> e copie a "Chave da API" (v3) ou o "Token de Leitura" (v4). Com mais de uma chave, o sistema alterna entre elas e troca sozinho se uma falhar, ficar lenta ou atingir o limite de uso. As chaves ficam salvas só neste navegador.</p>
+                    <div class="mb-3">
+                        <div class="flex items-center justify-between mb-1"><label class="text-xs text-zinc-400">Chave 1 (principal)</label><span id="settingsTmdbKeyStatus1" class="text-xs text-zinc-400"></span></div>
+                        <div class="flex gap-2">
+                            <input type="password" id="settingsTmdbKey1" autocomplete="off" spellcheck="false" placeholder="Cole aqui sua chave" class="bg-black border border-zinc-800 p-3 text-white text-sm placeholder-zinc-600 focus:outline-none focus:border-yellow-500 w-full rounded-lg" data-testid="settings-tmdb-key-1">
+                            <button type="button" id="settingsTmdbKeyToggle1" class="px-3 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg">Mostrar</button>
                         </div>
                     </div>
-                    
-                    <div class="overflow-x-auto custom-scrollbar">
-                        <table class="w-full text-left border-collapse min-w-[600px]">
-                            <thead>
-                                <tr class="bg-slate-50/50 text-slate-500 text-xs uppercase tracking-wider font-semibold">
-                                    <th class="px-6 py-4">Data</th>
-                                    <th class="px-6 py-4">Descrição</th>
-                                    <th class="px-6 py-4 text-right">Valor</th>
-                                    <th class="px-6 py-4 text-center">Ações</th>
-                                </tr>
-                            </thead>
-                            <tbody id="vendasTableBody" class="divide-y divide-slate-100 text-sm">
-                                <!-- Vendas serão inseridas aqui -->
-                            </tbody>
-                        </table>
-                        <div id="emptyState" class="hidden py-12 text-center px-4">
-                            <div class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-slate-100 mb-3">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                </svg>
-                            </div>
-                            <p class="text-slate-900 font-medium">Nenhuma venda registrada</p>
-                            <p class="text-slate-500 text-sm mt-1">Comece adicionando sua primeira venda ao lado.</p>
+                    <div class="mb-3">
+                        <div class="flex items-center justify-between mb-1"><label class="text-xs text-zinc-400">Chave 2 (opcional)</label><span id="settingsTmdbKeyStatus2" class="text-xs text-zinc-400"></span></div>
+                        <div class="flex gap-2">
+                            <input type="password" id="settingsTmdbKey2" autocomplete="off" spellcheck="false" placeholder="Cole aqui sua chave" class="bg-black border border-zinc-800 p-3 text-white text-sm placeholder-zinc-600 focus:outline-none focus:border-yellow-500 w-full rounded-lg" data-testid="settings-tmdb-key-2">
+                            <button type="button" id="settingsTmdbKeyToggle2" class="px-3 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg">Mostrar</button>
                         </div>
                     </div>
-                </div>
-            </div>
-        </div>
-    </main>
-
-    <!-- Footer discreto -->
-    <footer class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 border-t border-slate-200 mt-auto w-full">
-        <div class="flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-400">
-            <span>© 2024 Monitor Financeiro. Dados salvos localmente.</span>
-            <span class="flex items-center gap-1.5">
-                <span class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
-                Sistema Online (v5.0)
-            </span>
-        </div>
-    </footer>
-
-    <!-- Modal de Configuração -->
-    <div id="configModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm hidden items-center justify-center z-50 fade-in p-4">
-        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md border border-slate-200 overflow-hidden max-h-[90vh] overflow-y-auto custom-scrollbar">
-            <div class="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 sticky top-0 z-10">
-                <h2 class="text-lg font-semibold text-slate-900 flex items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                    </svg>
-                    Configurações
-                </h2>
-                <button type="button" id="btnCloseConfig" class="text-slate-400 hover:text-slate-600 hover:bg-slate-100 p-2 rounded-xl transition-colors active:scale-95">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                </button>
-            </div>
-            <div class="p-5 space-y-5">
-                <!-- Metas -->
-                <div>
-                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Metas e Comissões</p>
-                    <div class="space-y-4">
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Meta Total do Mês (R$)</label>
-                            <input type="number" id="metaMensal" step="0.01" min="0" class="w-full h-11 px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="0,00">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Dias de Trabalho no Mês</label>
-                            <input type="number" id="diasUteis" min="1" class="w-full h-11 px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="Ex: 22">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Porcentagem de Comissão (%)</label>
-                            <input type="number" id="comissaoPercentual" step="0.1" min="0" max="100" class="w-full h-11 px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="Ex: 5">
+                    <div class="mb-3">
+                        <div class="flex items-center justify-between mb-1"><label class="text-xs text-zinc-400">Chave 3 (opcional)</label><span id="settingsTmdbKeyStatus3" class="text-xs text-zinc-400"></span></div>
+                        <div class="flex gap-2">
+                            <input type="password" id="settingsTmdbKey3" autocomplete="off" spellcheck="false" placeholder="Cole aqui sua chave" class="bg-black border border-zinc-800 p-3 text-white text-sm placeholder-zinc-600 focus:outline-none focus:border-yellow-500 w-full rounded-lg" data-testid="settings-tmdb-key-3">
+                            <button type="button" id="settingsTmdbKeyToggle3" class="px-3 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg">Mostrar</button>
                         </div>
                     </div>
-                </div>
-
-                <!-- Salário e Benefícios -->
-                <div class="border-t border-slate-100 pt-5">
-                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Salário e Benefícios</p>
-                    <div class="space-y-4">
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Salário Base Fixo (R$)</label>
-                            <input type="number" id="salarioBase" step="0.01" min="0" class="w-full h-11 px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="0,00">
-                        </div>
-                        <div class="grid grid-cols-2 gap-3">
-                            <div>
-                                <label class="block text-sm font-medium text-slate-700 mb-1.5">VT por dia (R$)</label>
-                                <input type="number" id="valorVT" step="0.01" min="0" class="w-full h-11 px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="0,00">
-                            </div>
-                            <div>
-                                <label class="block text-sm font-medium text-slate-700 mb-1.5">VÁ por dia (R$)</label>
-                                <input type="number" id="valorVA" step="0.01" min="0" class="w-full h-11 px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="0,00">
-                            </div>
-                        </div>
+                    <button type="button" id="settingsTestKeys" class="w-full bg-zinc-800 hover:bg-zinc-700 text-white text-sm font-semibold py-3 rounded-lg transition-all" data-testid="settings-test-keys">Testar chaves</button>
+                    <p class="text-xs text-zinc-600 mt-3">Lembre-se de clicar em <b>Salvar</b> no final para guardar as chaves.</p>
+                </section>
+                <section class="border border-zinc-800 rounded-lg p-5">
+                    <label class="text-sm font-semibold text-zinc-300 mb-3 block">Logo / Marca d'água Padrão</label>
+                    <label class="border border-dashed border-zinc-700 p-5 text-center cursor-pointer hover:border-zinc-500 transition-colors flex flex-col items-center gap-2 rounded-lg">
+                        <span id="settingsLogoText" class="text-sm text-zinc-400">Carregar logo padrão</span>
+                        <input type="file" id="settingsLogoInput" accept="image/*" class="hidden" data-testid="settings-logo-input">
+                    </label>
+                    <button id="settingsRemoveLogo" class="mt-2 text-xs text-red-500 hover:text-red-400 transition-colors hidden">✕ Remover logo</button>
+                </section>
+                <section class="border border-zinc-800 rounded-lg p-5">
+                    <label class="text-sm font-semibold text-zinc-300 mb-3 block">Exibição da Marca d'água</label>
+                    <p class="text-xs text-zinc-500 mb-3">Vale para todos os geradores (Banner, Vídeo Trailer e Vídeo com Texto Livre) — o mesmo padrão escolhido aqui é usado em todos.</p>
+                    <div class="flex flex-col gap-3">
+                        <label class="flex items-center gap-3 cursor-pointer p-3 border border-zinc-800 rounded-lg hover:border-zinc-600">
+                            <input type="radio" name="watermarkMode" value="none" class="w-4 h-4 accent-purple-500" data-testid="watermark-none">
+                            <span class="text-sm text-zinc-300">Sem marca d'água</span>
+                        </label>
+                        <label class="flex items-center gap-3 cursor-pointer p-3 border border-zinc-800 rounded-lg hover:border-zinc-600">
+                            <input type="radio" name="watermarkMode" value="corner" class="w-4 h-4 accent-purple-500" checked data-testid="watermark-corner">
+                            <span class="text-sm text-zinc-300">Canto direito superior</span>
+                        </label>
+                        <label class="flex items-center gap-3 cursor-pointer p-3 border border-zinc-800 rounded-lg hover:border-zinc-600">
+                            <input type="radio" name="watermarkMode" value="full" class="w-4 h-4 accent-purple-500" data-testid="watermark-full">
+                            <span class="text-sm text-zinc-300">Canto direito superior + Fundo do banner</span>
+                        </label>
                     </div>
+                </section>
+                <section class="border border-zinc-800 rounded-lg p-5">
+                    <label class="text-sm font-semibold text-zinc-300 mb-3 block">Box Esquerdo</label>
+                    <input type="text" id="settingsInstagramHandle" placeholder="Digite o texto do box (ex: @usuario, site, frase...)" value="@seuinstagram" class="bg-black border border-zinc-800 p-4 text-white placeholder-zinc-600 focus:outline-none focus:border-purple-500 w-full rounded-lg" data-testid="settings-instagram-input">
+                </section>
+                <section class="border border-zinc-800 rounded-lg p-5">
+                    <label class="text-sm font-semibold text-zinc-300 mb-3 block">Box Central</label>
+                    <input type="text" id="settingsWhatsappText" placeholder="Digite o texto do box (ex: número, site, frase...)" class="bg-black border border-zinc-800 p-4 text-white placeholder-zinc-600 focus:outline-none focus:border-green-500 w-full rounded-lg" data-testid="settings-whatsapp-text-input">
+                </section>
+                <section class="border border-zinc-800 rounded-lg p-5">
+                    <label class="text-sm font-semibold text-zinc-300 mb-3 block">Box Direito</label>
+                    <input type="text" id="settingsCtaText" placeholder="Digite o texto do box (ex: ASSINA JÁ)" value="ASSINA JÁ" class="bg-black border border-zinc-800 p-4 text-white placeholder-zinc-600 focus:outline-none focus:border-red-500 w-full rounded-lg" data-testid="settings-cta-input">
+                </section>
+                <div class="border-t border-zinc-800 pt-2">
+                    <h3 class="font-oswald text-xl font-bold mb-1">Personalizar os 3 Boxes</h3>
+                    <p class="text-xs text-zinc-500 mb-4">Defina uma logo/ícone e cores próprias para cada box, ou oculte os que não quiser (os boxes visíveis dividem a largura). Deixe desmarcado para manter o padrão.</p>
                 </div>
 
-                <!-- Estratégia Diária -->
-                <div class="border-t border-slate-100 pt-5">
-                    <p class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Estratégia Diária</p>
-                    <div class="space-y-4">
-                        <div>
-                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Valor Mínimo por Cliente (R$)</label>
-                            <input type="number" id="valorMinimoPorCliente" step="0.01" min="0" class="w-full h-11 px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="Ex: 50,00">
-                            <p class="text-xs text-slate-500 mt-1.5 bg-slate-50 p-3 rounded-lg border border-slate-100">
-                                💡 O sistema usará este valor para calcular quantos clientes você precisa atender hoje para bater a meta diária.
-                            </p>
-                        </div>
+                <!-- BOX INSTAGRAM -->
+                <section class="border border-zinc-800 rounded-lg p-5">
+                    <label class="text-sm font-semibold text-purple-400 mb-3 block">Box Esquerdo</label>
+                    <label class="flex items-center gap-3 cursor-pointer mb-3 p-3 border border-zinc-800 rounded-lg hover:border-zinc-600"><input type="checkbox" id="boxInstagramHide" class="w-4 h-4 accent-purple-500" data-testid="box-instagram-hide"><span class="text-xs text-zinc-300">Ocultar este box (não aparece no banner/vídeo)</span></label>
+                    <label class="border border-dashed border-zinc-700 p-4 text-center cursor-pointer hover:border-zinc-500 transition-colors flex flex-col items-center gap-2 rounded-lg mb-3">
+                        <span id="boxInstagramIconText" class="text-xs text-zinc-400">Ícone/logo personalizado (opcional)</span>
+                        <input type="file" id="boxInstagramIconInput" accept="image/*" class="hidden">
+                    </label>
+                    <button id="boxInstagramIconRemove" class="text-xs text-red-500 hover:text-red-400 transition-colors hidden mb-3">✕ Remover ícone</button>
+                    <div class="flex items-center gap-3 mb-2">
+                        <input type="checkbox" id="boxInstagramBgOn" class="w-4 h-4 accent-purple-500">
+                        <label class="text-xs text-zinc-400 flex-1">Cor de fundo personalizada</label>
+                        <input type="color" id="boxInstagramBgColor" value="#dc2743" class="w-10 h-8 rounded border border-zinc-700 bg-transparent cursor-pointer">
                     </div>
-                </div>
+                    <div class="flex items-center gap-3">
+                        <input type="checkbox" id="boxInstagramTextOn" class="w-4 h-4 accent-purple-500">
+                        <label class="text-xs text-zinc-400 flex-1">Cor do texto personalizada</label>
+                        <input type="color" id="boxInstagramTextColor" value="#ffffff" class="w-10 h-8 rounded border border-zinc-700 bg-transparent cursor-pointer">
+                    </div>
+                </section>
 
-                <button type="button" id="btnSaveConfig" class="w-full h-11 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl shadow-sm hover:shadow transition-all mt-2 active:scale-[0.98]">
-                    Salvar Configurações
-                </button>
+                <!-- BOX WHATSAPP -->
+                <section class="border border-zinc-800 rounded-lg p-5">
+                    <label class="text-sm font-semibold text-green-400 mb-3 block">Box Central</label>
+                    <label class="flex items-center gap-3 cursor-pointer mb-3 p-3 border border-zinc-800 rounded-lg hover:border-zinc-600"><input type="checkbox" id="boxWhatsappHide" class="w-4 h-4 accent-green-500" data-testid="box-whatsapp-hide"><span class="text-xs text-zinc-300">Ocultar este box (não aparece no banner/vídeo)</span></label>
+                    <label class="border border-dashed border-zinc-700 p-4 text-center cursor-pointer hover:border-zinc-500 transition-colors flex flex-col items-center gap-2 rounded-lg mb-3">
+                        <span id="boxWhatsappIconText" class="text-xs text-zinc-400">Ícone/logo personalizado (opcional)</span>
+                        <input type="file" id="boxWhatsappIconInput" accept="image/*" class="hidden">
+                    </label>
+                    <button id="boxWhatsappIconRemove" class="text-xs text-red-500 hover:text-red-400 transition-colors hidden mb-3">✕ Remover ícone</button>
+                    <div class="flex items-center gap-3 mb-2">
+                        <input type="checkbox" id="boxWhatsappBgOn" class="w-4 h-4 accent-green-500">
+                        <label class="text-xs text-zinc-400 flex-1">Cor de fundo personalizada</label>
+                        <input type="color" id="boxWhatsappBgColor" value="#25D366" class="w-10 h-8 rounded border border-zinc-700 bg-transparent cursor-pointer">
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <input type="checkbox" id="boxWhatsappTextOn" class="w-4 h-4 accent-green-500">
+                        <label class="text-xs text-zinc-400 flex-1">Cor do texto personalizada</label>
+                        <input type="color" id="boxWhatsappTextColor" value="#ffffff" class="w-10 h-8 rounded border border-zinc-700 bg-transparent cursor-pointer">
+                    </div>
+                </section>
+
+                <!-- BOX CTA -->
+                <section class="border border-zinc-800 rounded-lg p-5">
+                    <label class="text-sm font-semibold text-red-400 mb-3 block">Box Direito</label>
+                    <label class="flex items-center gap-3 cursor-pointer mb-3 p-3 border border-zinc-800 rounded-lg hover:border-zinc-600"><input type="checkbox" id="boxCtaHide" class="w-4 h-4 accent-red-500" data-testid="box-cta-hide"><span class="text-xs text-zinc-300">Ocultar este box (não aparece no banner/vídeo)</span></label>
+                    <label class="border border-dashed border-zinc-700 p-4 text-center cursor-pointer hover:border-zinc-500 transition-colors flex flex-col items-center gap-2 rounded-lg mb-3">
+                        <span id="boxCtaIconText" class="text-xs text-zinc-400">Ícone/logo personalizado (opcional)</span>
+                        <input type="file" id="boxCtaIconInput" accept="image/*" class="hidden">
+                    </label>
+                    <button id="boxCtaIconRemove" class="text-xs text-red-500 hover:text-red-400 transition-colors hidden mb-3">✕ Remover ícone</button>
+                    <div class="flex items-center gap-3 mb-2">
+                        <input type="checkbox" id="boxCtaBgOn" class="w-4 h-4 accent-red-500">
+                        <label class="text-xs text-zinc-400 flex-1">Cor de fundo personalizada</label>
+                        <input type="color" id="boxCtaBgColor" value="#ef4444" class="w-10 h-8 rounded border border-zinc-700 bg-transparent cursor-pointer">
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <input type="checkbox" id="boxCtaTextOn" class="w-4 h-4 accent-red-500">
+                        <label class="text-xs text-zinc-400 flex-1">Cor do texto personalizada</label>
+                        <input type="color" id="boxCtaTextColor" value="#ffffff" class="w-10 h-8 rounded border border-zinc-700 bg-transparent cursor-pointer">
+                    </div>
+                </section>
+
+                <div class="flex gap-3 pt-4 border-t border-zinc-800">
+                    <button onclick="saveSettings()" class="flex-1 bg-green-500 hover:bg-green-400 text-white font-bold py-4 rounded-lg transition-all" data-testid="save-settings-btn">Salvar</button>
+                    <button onclick="closeSettings()" class="px-8 bg-zinc-800 hover:bg-zinc-700 text-white font-bold py-4 rounded-lg transition-all">Cancelar</button>
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- Modal de Relatório -->
-    <div id="reportModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm hidden items-center justify-center z-50 fade-in p-4">
-        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm border border-slate-200 overflow-hidden">
-            <div class="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                <h2 class="text-lg font-semibold text-slate-900 flex items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    Gerar Relatório
-                </h2>
-                <button type="button" id="btnCloseReport" class="text-slate-400 hover:text-slate-600 hover:bg-slate-100 p-2 rounded-xl transition-colors active:scale-95">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                </button>
+    <div id="homeScreen" class="min-h-screen flex items-center justify-center p-6">
+        <div class="w-full max-w-5xl">
+            <header class="text-center mb-16">
+                <h1 class="font-oswald text-6xl font-bold tracking-tight flex items-center justify-center gap-4 mb-4">
+                    <svg class="w-16 h-16 text-red-500" fill="currentColor" viewBox="0 0 256 256"><path d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40Zm0,160H40V56H216V200ZM184,96a8,8,0,0,1-8,8H136v40a8,8,0,0,1-16,0V104H80a8,8,0,0,1,0-16h96A8,8,0,0,1,184,96Z"/></svg>
+                    Banner Generator Pro
+                </h1>
+                <p class="text-zinc-500 text-xl">Escolha o tipo de banner que deseja criar</p>
+            </header>
+            <div id="apiKeyNotice" class="hidden max-w-3xl mx-auto mb-8 border border-yellow-600/50 bg-yellow-900/20 rounded-xl p-4 text-sm text-yellow-200 flex flex-col sm:flex-row items-center justify-between gap-3" data-testid="api-key-notice">
+                <span>Para buscar filmes e séries, configure sua chave da API do TMDB (gratuita) em Configurações.</span>
+                <button type="button" onclick="openSettings()" class="shrink-0 bg-yellow-500 hover:bg-yellow-400 text-black font-bold text-sm py-2 px-4 rounded-lg">Configurar agora</button>
             </div>
-            <div class="p-5 space-y-3">
-                <button type="button" id="btnReportDay" class="w-full h-12 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold rounded-xl border border-indigo-200 transition-all flex items-center justify-center gap-2 group active:scale-[0.98]">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-600 group-hover:scale-110 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                    </svg>
-                    Relatório do Dia (Hoje)
-                </button>
-                <button type="button" id="btnReportMonth" class="w-full h-12 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-semibold rounded-xl border border-emerald-200 transition-all flex items-center justify-center gap-2 group active:scale-[0.98]">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-emerald-600 group-hover:scale-110 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                    </svg>
-                    Relatório do Mês Completo
-                </button>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-5xl mx-auto">
+                <div class="box-selector bg-gradient-to-br from-red-900/20 to-zinc-900 border-2 border-red-500/30 rounded-2xl p-8 hover:border-red-500" onclick="selectMode('movies')" data-testid="movies-mode-btn">
+                    <div class="text-center">
+                        <div class="w-20 h-20 bg-red-500 rounded-full flex items-center justify-center mx-auto mb-6 text-3xl">&#127916;</div>
+                        <h3 class="font-oswald text-2xl font-bold mb-3">Filmes e Séries</h3>
+                        <p class="text-zinc-400 text-sm mb-6">Crie banners incríveis para filmes e séries</p>
+                    </div>
+                </div>
+                <div class="box-selector bg-gradient-to-br from-purple-900/20 to-zinc-900 border-2 border-purple-500/30 rounded-2xl p-8 hover:border-purple-500" onclick="selectMode('video')" data-testid="video-mode-btn">
+                    <div class="text-center">
+                        <div class="w-20 h-20 bg-purple-500 rounded-full flex items-center justify-center mx-auto mb-6 text-3xl">&#127909;</div>
+                        <h3 class="font-oswald text-2xl font-bold mb-3">Trailers em Vídeo</h3>
+                        <p class="text-zinc-400 text-sm mb-6">Gere trailers em MP4 otimizado para WhatsApp (1080x1080)</p>
+                    </div>
+                </div>
+                <div class="box-selector bg-gradient-to-br from-blue-900/20 to-zinc-900 border-2 border-blue-500/30 rounded-2xl p-8 hover:border-blue-500" onclick="selectMode('customvideo')" data-testid="customvideo-mode-btn">
+                    <div class="text-center">
+                        <div class="w-20 h-20 bg-blue-500 rounded-full flex items-center justify-center mx-auto mb-6 text-3xl">&#128221;</div>
+                        <h3 class="font-oswald text-2xl font-bold mb-3">Vídeo com Texto Livre</h3>
+                        <p class="text-zinc-400 text-sm mb-6">Gere vídeo MP4 com um texto personalizado no lugar da info do filme</p>
+                    </div>
+                </div>
             </div>
+                    <p class="text-center text-xs text-zinc-600 mt-12">Este produto usa a API do TMDB, mas não é endossado ou certificado pelo TMDB.</p>
         </div>
     </div>
 
-    <!-- Toast Notification -->
-    <div id="toast" class="fixed bottom-6 right-6 left-6 sm:left-auto sm:w-auto bg-slate-800 text-white px-5 py-3.5 rounded-xl shadow-2xl transform translate-y-24 opacity-0 transition-all duration-300 flex items-center gap-3 z-50 border border-slate-700">
-        <svg id="toastIcon" xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-emerald-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-        </svg>
-        <span id="toastMessage" class="text-sm font-medium">Operação realizada com sucesso!</span>
+    <div id="editorScreen" class="min-h-screen hidden">
+        <div class="flex flex-col lg:flex-row min-h-screen">
+            <div class="w-full lg:w-20 bg-zinc-950 border-r border-zinc-800 flex lg:flex-col items-center justify-start lg:justify-center gap-4 p-4">
+                <button onclick="goHome()" class="w-12 h-12 rounded-lg bg-zinc-800 hover:bg-zinc-700 flex items-center justify-center transition-colors" title="Voltar" data-testid="go-home-btn">&#127968;</button>
+            </div>
+            <aside id="controlPanel" class="w-full lg:w-[420px] border-r border-zinc-800 bg-zinc-900/50 p-6 lg:p-8 overflow-y-auto lg:h-screen lg:sticky lg:top-0 flex flex-col gap-5"></aside>
+            <main class="flex-1 relative p-6 lg:p-12 bg-[#050505] min-h-[600px]">
+                <div class="absolute inset-0 bg-[radial-gradient(circle_at_center,_#18181b_0%,_#050505_70%)] opacity-50"></div>
+                <div class="relative z-10 w-full max-w-4xl" id="bannersContainer">
+                    <canvas id="bannerCanvas" class="canvas-glow max-w-full h-auto rounded-lg mx-auto"></canvas>
+                    <div id="videoContainer" class="hidden flex flex-col items-center gap-4"></div>
+                </div>
+            </main>
+        </div>
     </div>
 
-    <script>
-        function getLocalDateString(date = new Date()) {
-            const year = date.getFullYear();
-            const month = String(date.getMonth() + 1).padStart(2, '0');
-            const day = String(date.getDate()).padStart(2, '0');
-            return `${year}-${month}-${day}`;
-        }
+    <!-- FFmpeg.wasm 0.11.6 - compactação WhatsApp HD -->
+    <script src="vendor/ffmpeg.min.js"></script>
 
-        function formatCurrency(value) {
-            if (isNaN(value)) return "R$ 0,00";
-            return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
-        }
-
-        function formatDate(dateString) {
-            if (!dateString) return '';
-            const [year, month, day] = dateString.split('-');
-            return `${day}/${month}/${year}`;
-        }
-
-        let localStorageAvailable = true;
-        let state = {
-            metaMensal: 0,
-            diasUteis: 22,
-            comissaoPercentual: 0,
-            salarioBase: 0,
-            valorVT: 0,
-            valorVA: 0,
-            valorMinimoPorCliente: 0,
-            vendas: []
-        };
-
-        function loadState() {
-            try {
-                const saved = localStorage.getItem('salesTrackerState');
-                if (saved) {
-                    const parsed = JSON.parse(saved);
-                    state.metaMensal = parseFloat(parsed.metaMensal) || 0;
-                    state.diasUteis = parseInt(parsed.diasUteis) || 22;
-                    state.comissaoPercentual = parseFloat(parsed.comissaoPercentual) || 0;
-                    state.salarioBase = parseFloat(parsed.salarioBase) || 0;
-                    state.valorVT = parseFloat(parsed.valorVT) || 0;
-                    state.valorVA = parseFloat(parsed.valorVA) || 0;
-                    state.valorMinimoPorCliente = parseFloat(parsed.valorMinimoPorCliente) || 0;
-                    state.vendas = Array.isArray(parsed.vendas) ? parsed.vendas : [];
-                }
-            } catch (e) {
-                localStorageAvailable = false;
-                console.warn("LocalStorage indisponível, usando modo memória.");
-            }
-            
-            document.getElementById('metaMensal').value = state.metaMensal || '';
-            document.getElementById('diasUteis').value = state.diasUteis || '';
-            document.getElementById('comissaoPercentual').value = state.comissaoPercentual || '';
-            document.getElementById('salarioBase').value = state.salarioBase || '';
-            document.getElementById('valorVT').value = state.valorVT || '';
-            document.getElementById('valorVA').value = state.valorVA || '';
-            document.getElementById('valorMinimoPorCliente').value = state.valorMinimoPorCliente || '';
-            document.getElementById('vendaData').value = getLocalDateString();
-            
-            render();
-        }
-
-        function saveState() {
-            if (!localStorageAvailable) {
-                render();
-                return;
-            }
-            try {
-                localStorage.setItem('salesTrackerState', JSON.stringify(state));
-            } catch (e) {
-                localStorageAvailable = false;
-                console.warn("Falha ao salvar no LocalStorage.");
-            }
-            render();
-        }
-
-        function render() {
-            const metaDiaria = state.diasUteis > 0 ? (state.metaMensal / state.diasUteis) : 0;
-            document.getElementById('metaDiariaDisplay').textContent = formatCurrency(metaDiaria);
-
-            const totalVendido = state.vendas.reduce((acc, v) => acc + (parseFloat(v.valor) || 0), 0);
-            const percentual = state.metaMensal > 0 ? (totalVendido / state.metaMensal) * 100 : 0;
-            const saldoRestante = Math.max(0, state.metaMensal - totalVendido);
-            const totalComissao = totalVendido * (state.comissaoPercentual / 100);
-            
-            // Cálculo do Salário Estimado
-            const totalBeneficios = (state.valorVT + state.valorVA) * state.diasUteis;
-            const salarioEstimado = state.salarioBase + totalBeneficios + totalComissao;
-            
-            const todayStr = getLocalDateString();
-            const vendasHoje = state.vendas.filter(v => v.data === todayStr);
-            const totalHoje = vendasHoje.reduce((acc, v) => acc + (parseFloat(v.valor) || 0), 0);
-            
-            // Cálculo de Clientes Restantes Hoje
-            const faltaHoje = Math.max(0, metaDiaria - totalHoje);
-            let clientesRestantes = 0;
-            if (faltaHoje > 0 && state.valorMinimoPorCliente > 0) {
-                clientesRestantes = Math.ceil(faltaHoje / state.valorMinimoPorCliente);
-            } else if (faltaHoje <= 0) {
-                clientesRestantes = 0; // Meta já atingida
-            }
-
-            document.getElementById('totalVendido').textContent = formatCurrency(totalVendido);
-            document.getElementById('percentualMeta').textContent = `${percentual.toFixed(1)}% da meta`;
-            document.getElementById('progressBar').style.width = Math.min(100, percentual) + '%';
-            document.getElementById('saldoRestante').textContent = formatCurrency(saldoRestante);
-            document.getElementById('totalComissao').textContent = formatCurrency(totalComissao);
-            document.getElementById('comissaoPercentualDisplay').textContent = `${state.comissaoPercentual}% sobre vendas`;
-            document.getElementById('totalHoje').textContent = formatCurrency(totalHoje);
-            document.getElementById('salarioEstimado').textContent = formatCurrency(salarioEstimado);
-            
-            // Atualiza o card de clientes restantes
-            const elClientes = document.getElementById('clientesRestantesHoje');
-            elClientes.textContent = clientesRestantes;
-            if (clientesRestantes === 0 && faltaHoje <= 0) {
-                elClientes.textContent = "🎉";
-                elClientes.nextElementSibling.textContent = "Meta diária atingida!";
-                elClientes.classList.remove('text-purple-600');
-                elClientes.classList.add('text-emerald-600');
-            } else {
-                elClientes.nextElementSibling.textContent = "para meta diária";
-                elClientes.classList.remove('text-emerald-600');
-                elClientes.classList.add('text-purple-600');
-            }
-
-            const tbody = document.getElementById('vendasTableBody');
-            const emptyState = document.getElementById('emptyState');
-            const countBadge = document.getElementById('totalVendasCount');
-            
-            tbody.innerHTML = '';
-            countBadge.textContent = `${state.vendas.length} venda${state.vendas.length !== 1 ? 's' : ''}`;
-
-            if (state.vendas.length === 0) {
-                emptyState.classList.remove('hidden');
-            } else {
-                emptyState.classList.add('hidden');
-                state.vendas.forEach(venda => {
-                    const tr = document.createElement('tr');
-                    tr.className = 'hover:bg-slate-50/80 transition-colors fade-in group';
-                    tr.innerHTML = `
-                        <td class="px-6 py-4 text-slate-600 font-medium whitespace-nowrap">${formatDate(venda.data)}</td>
-                        <td class="px-6 py-4 text-slate-700">${venda.descricao}</td>
-                        <td class="px-6 py-4 text-right font-semibold text-slate-900 whitespace-nowrap">${formatCurrency(venda.valor)}</td>
-                        <td class="px-6 py-4 text-center">
-                            <button type="button" class="btn-excluir inline-flex items-center justify-center p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all opacity-100 lg:opacity-0 lg:group-hover:opacity-100 focus:opacity-100 active:scale-90" data-id="${venda.id}" title="Excluir venda">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                </svg>
-                            </button>
-                        </td>
-                    `;
-                    tbody.appendChild(tr);
-                });
-            }
-        }
-
-        function showToast(message, type = 'success') {
-            const toast = document.getElementById('toast');
-            const toastMessage = document.getElementById('toastMessage');
-            const toastIcon = document.getElementById('toastIcon');
-            
-            toastMessage.textContent = message;
-            
-            if (type === 'error') {
-                toastIcon.classList.remove('text-emerald-400');
-                toastIcon.classList.add('text-red-400');
-                toastIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />';
-            } else {
-                toastIcon.classList.remove('text-red-400');
-                toastIcon.classList.add('text-emerald-400');
-                toastIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />';
-            }
-            
-            toast.classList.remove('translate-y-24', 'opacity-0');
-            
-            setTimeout(() => {
-                toast.classList.add('translate-y-24', 'opacity-0');
-            }, 3000);
-        }
-
-        window.excluirVenda = function(id) {
-            setTimeout(() => {
-                if (confirm('Tem certeza que deseja excluir esta venda? Esta ação não pode ser desfeita.')) {
-                    const antes = state.vendas.length;
-                    state.vendas = state.vendas.filter(v => String(v.id) !== String(id));
-                    if (state.vendas.length < antes) {
-                        saveState();
-                        showToast('Venda excluída com sucesso!');
-                    } else {
-                        showToast('Erro: Venda não encontrada.', 'error');
-                    }
-                }
-            }, 50);
-        };
-
-        window.limparTudo = function() {
-            if (state.vendas.length === 0) {
-                showToast('O histórico já está vazio.', 'error');
-                return;
-            }
-            setTimeout(() => {
-                if (confirm('ATENÇÃO: Isso apagará TODAS as vendas registradas permanentemente. Deseja continuar?')) {
-                    state.vendas = [];
-                    saveState();
-                    showToast('Histórico limpo com sucesso!');
-                }
-            }, 50);
-        };
-
-        window.copyReport = function(period) {
-            document.getElementById('reportModal').classList.add('hidden');
-            document.getElementById('reportModal').classList.remove('flex');
-            
-            const today = new Date().toLocaleDateString('pt-BR');
-            const todayStr = getLocalDateString();
-            const filteredVendas = period === 'day' ? state.vendas.filter(v => v.data === todayStr) : state.vendas;
-            const totalPeriod = filteredVendas.reduce((acc, v) => acc + (parseFloat(v.valor) || 0), 0);
-            
-            const totalVendidoMes = state.vendas.reduce((acc, v) => acc + (parseFloat(v.valor) || 0), 0);
-            const totalComissaoMes = totalVendidoMes * (state.comissaoPercentual / 100);
-            const totalBeneficios = (state.valorVT + state.valorVA) * state.diasUteis;
-            const salarioEstimado = state.salarioBase + totalBeneficios + totalComissaoMes;
-            const metaDiaria = state.diasUteis > 0 ? (state.metaMensal / state.diasUteis) : 0;
-            const totalHoje = filteredVendas.filter(v => v.data === todayStr).reduce((acc, v) => acc + (parseFloat(v.valor) || 0), 0);
-            const faltaHoje = Math.max(0, metaDiaria - totalHoje);
-            const clientesRestantes = (faltaHoje > 0 && state.valorMinimoPorCliente > 0) ? Math.ceil(faltaHoje / state.valorMinimoPorCliente) : 0;
-
-            let report = `📊 RELATÓRIO FINANCEIRO - ${today}\n\n`;
-            
-            if (period === 'day') {
-                report += `🎯 Meta Diária: ${formatCurrency(metaDiaria)}\n`;
-                report += `✅ Vendido Hoje: ${formatCurrency(totalHoje)}\n`;
-                report += `👥 Clientes Restantes Hoje: ${clientesRestantes === 0 && faltaHoje <= 0 ? 'Meta Atingida! 🎉' : clientesRestantes}\n\n`;
-            }
-            
-            report += `--- RESUMO MENSAL ---\n`;
-            report += `🎯 Meta Mensal: ${formatCurrency(state.metaMensal)}\n`;
-            report += `✅ Total Vendido: ${formatCurrency(totalVendidoMes)}\n`;
-            report += `📈 Atingimento: ${state.metaMensal > 0 ? ((totalVendidoMes / state.metaMensal) * 100).toFixed(1) : 0}%\n\n`;
-            
-            report += `--- COMPOSIÇÃO DO SALÁRIO ---\n`;
-            report += `💰 Salário Base: ${formatCurrency(state.salarioBase)}\n`;
-            report += `🚌 Benefícios (VT/VA): ${formatCurrency(totalBeneficios)}\n`;
-            report += `💸 Comissão Total: ${formatCurrency(totalComissaoMes)}\n`;
-            report += `🚀 SALÁRIO ESTIMADO: ${formatCurrency(salarioEstimado)}\n\n`;
-            
-            if (filteredVendas.length > 0) {
-                report += `📋 Detalhamento das Vendas:\n`;
-                filteredVendas.forEach(v => {
-                    report += `- ${formatDate(v.data)} | ${formatCurrency(v.valor)} | ${v.descricao}\n`;
-                });
-            }
-
-            navigator.clipboard.writeText(report).then(() => {
-                showToast(`Relatório copiado com sucesso!`);
-            }).catch(() => {
-                showToast('Erro ao copiar relatório.', 'error');
-            });
-        };
-
-        document.getElementById('btnOpenConfig').addEventListener('click', () => {
-            document.getElementById('configModal').classList.remove('hidden');
-            document.getElementById('configModal').classList.add('flex');
-        });
-
-        document.getElementById('btnCloseConfig').addEventListener('click', () => {
-            document.getElementById('configModal').classList.add('hidden');
-            document.getElementById('configModal').classList.remove('flex');
-        });
-
-        document.getElementById('btnSaveConfig').addEventListener('click', () => {
-            state.metaMensal = parseFloat(document.getElementById('metaMensal').value) || 0;
-            state.diasUteis = parseInt(document.getElementById('diasUteis').value) || 0;
-            state.comissaoPercentual = parseFloat(document.getElementById('comissaoPercentual').value) || 0;
-            state.salarioBase = parseFloat(document.getElementById('salarioBase').value) || 0;
-            state.valorVT = parseFloat(document.getElementById('valorVT').value) || 0;
-            state.valorVA = parseFloat(document.getElementById('valorVA').value) || 0;
-            state.valorMinimoPorCliente = parseFloat(document.getElementById('valorMinimoPorCliente').value) || 0;
-            
-            saveState();
-            document.getElementById('configModal').classList.add('hidden');
-            document.getElementById('configModal').classList.remove('flex');
-            showToast('Configurações salvas com sucesso!');
-        });
-
-        document.getElementById('btnOpenReport').addEventListener('click', () => {
-            document.getElementById('reportModal').classList.remove('hidden');
-            document.getElementById('reportModal').classList.add('flex');
-        });
-
-        document.getElementById('btnCloseReport').addEventListener('click', () => {
-            document.getElementById('reportModal').classList.add('hidden');
-            document.getElementById('reportModal').classList.remove('flex');
-        });
-
-        document.getElementById('vendaForm').addEventListener('submit', (e) => {
-            e.preventDefault();
-            try {
-                const data = document.getElementById('vendaData').value;
-                const valor = parseFloat(document.getElementById('vendaValor').value);
-                const descricao = document.getElementById('vendaDescricao').value.trim();
-
-                if (!data || isNaN(valor) || valor <= 0) {
-                    showToast('Preencha a data e o valor corretamente.', 'error');
-                    return;
-                }
-
-                state.vendas.push({
-                    id: Date.now().toString(),
-                    data: data,
-                    valor: valor,
-                    descricao: descricao || 'Sem descrição'
-                });
-                
-                state.vendas.sort((a, b) => new Date(b.data) - new Date(a.data));
-                saveState();
-                
-                document.getElementById('vendaValor').value = '';
-                document.getElementById('vendaDescricao').value = '';
-                
-                showToast('Venda registrada com sucesso!');
-                document.getElementById('vendaValor').focus();
-            } catch (e) {
-                showToast('Erro ao adicionar venda: ' + e.message, 'error');
-            }
-        });
-
-        document.getElementById('btnClearAll').addEventListener('click', window.limparTudo);
-        document.getElementById('btnReportDay').addEventListener('click', () => window.copyReport('day'));
-        document.getElementById('btnReportMonth').addEventListener('click', () => window.copyReport('month'));
-
-        document.getElementById('vendasTableBody').addEventListener('click', function(e) {
-            const btn = e.target.closest('.btn-excluir');
-            if (btn) {
-                const id = btn.getAttribute('data-id');
-                window.excluirVenda(id);
-            }
-        });
-
-        document.getElementById('configModal').addEventListener('click', function(e) {
-            if (e.target === this) {
-                this.classList.add('hidden');
-                this.classList.remove('flex');
-            }
-        });
-        document.getElementById('reportModal').addEventListener('click', function(e) {
-            if (e.target === this) {
-                this.classList.add('hidden');
-                this.classList.remove('flex');
-            }
-        });
-
-        document.addEventListener('DOMContentLoaded', loadState);
-    </script>
-<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v833ccba57c9e4d2798f2e76cebdd09a11778172276447" integrity="sha512-57MDmcccJXYtNnH+ZiBwzC4jb2rvgVCEokYN+L/nLlmO8rfYT/gIpW2A569iJ/3b+0UEasghjuZH/ma3wIs/EQ==" data-cf-beacon='{"version":"2024.11.0","token":"75124c326cb447fe934cde04713ae013","r":1,"server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+    <script src="banner-app.js"></script>
 </body>
 </html>

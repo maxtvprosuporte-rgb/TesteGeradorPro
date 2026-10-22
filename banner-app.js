@@ -1,0 +1,3267 @@
+const API_BASE_URL = window.location.origin;
+const TMDB_BASE_URL = API_BASE_URL + '/api/tmdb';        // proxy do servidor (modo servidor opcional)
+const TMDB_DIRECT_URL = 'https://api.themoviedb.org/3'; // chamada direta (modo GitHub Pages)
+const TMDB_IMG_BASE = 'https://image.tmdb.org/t/p';
+
+// ============================================
+// API TMDB — até 3 chaves configuradas nas Configurações do site.
+// - Com chaves configuradas: o navegador chama a TMDB direto (funciona em GitHub Pages,
+//   sem servidor e sem variável de ambiente).
+// - As chaves são usadas em rodízio; se uma falhar (inválida, limite de uso ou lenta),
+//   o sistema troca automaticamente para a próxima.
+// - Sem chaves, mas com o servidor (server.js) disponível: usa o servidor, como antes.
+// ============================================
+let backendAvailable = false;   // detectado ao carregar (rota /health do server.js)
+let tmdbKeyCursor = 0;
+const tmdbKeyBlockedUntil = {}; // chave -> timestamp até quando evitar usar
+const tmdbCache = {};           // caminho -> { t, data }
+const TMDB_CACHE_MS = 15 * 60 * 1000;
+
+function TmdbError(code, message) {
+    var e = new Error(message || code);
+    e.name = 'TmdbError';
+    e.code = code;
+    return e;
+}
+
+function getTmdbKeys() {
+    var keys = (typeof globalSettings !== 'undefined' && globalSettings.tmdbKeys) ? globalSettings.tmdbKeys : [];
+    return keys.map(function(k) { return (k || '').trim(); }).filter(Boolean).slice(0, 3);
+}
+
+// Usa a TMDB direto quando há chaves configuradas, ou quando não existe servidor
+function usingDirectTmdb() { return getTmdbKeys().length > 0 || !backendAvailable; }
+
+function fetchWithTimeout(url, options, ms) {
+    var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = setTimeout(function() { if (ctrl) ctrl.abort(); }, ms);
+    var opts = options || {};
+    if (ctrl) opts.signal = ctrl.signal;
+    return fetch(url, opts).then(function(r) { clearTimeout(timer); return r; }, function(e) { clearTimeout(timer); throw e; });
+}
+
+// Chave v4 (token de leitura, começa com "eyJ") vai no cabeçalho; chave v3 vai na URL
+function tmdbBuildRequest(key, path) {
+    var url = TMDB_DIRECT_URL + path;
+    var headers = {};
+    if (/^eyJ/.test(key) || key.length > 40) { headers['Authorization'] = 'Bearer ' + key; }
+    else { url += (url.indexOf('?') === -1 ? '?' : '&') + 'api_key=' + encodeURIComponent(key); }
+    return { url: url, headers: headers };
+}
+
+// Busca na TMDB (retorna o JSON). pathAndQuery ex.: '/search/movie?language=pt-BR&query=matrix'
+async function tmdbApi(pathAndQuery) {
+    var path = pathAndQuery.replace(/\/watch(\?|$)/, '/watch/providers$1'); // atalho usado pelo app
+
+    var cached = tmdbCache[path];
+    if (cached && (Date.now() - cached.t) < TMDB_CACHE_MS) return cached.data;
+
+    var keys = getTmdbKeys();
+    var data;
+
+    if (keys.length === 0) {
+        if (!backendAvailable) throw TmdbError('NO_KEYS', 'Nenhuma chave da API configurada.');
+        var r = await fetchWithTimeout(TMDB_BASE_URL + pathAndQuery, {}, 15000);
+        if (!r.ok) throw TmdbError('HTTP_' + r.status, 'Erro do servidor (' + r.status + ').');
+        data = await r.json();
+    } else {
+        // Rodízio: cada busca começa por uma chave diferente; chaves bloqueadas ficam por último
+        var start = tmdbKeyCursor++ % keys.length;
+        var now = Date.now();
+        var order = [];
+        for (var i = 0; i < keys.length; i++) order.push(keys[(start + i) % keys.length]);
+        var ready = order.filter(function(k) { return (tmdbKeyBlockedUntil[k] || 0) <= now; });
+        var blocked = order.filter(function(k) { return (tmdbKeyBlockedUntil[k] || 0) > now; });
+        order = ready.concat(blocked);
+
+        var lastErr = null;
+        for (var n = 0; n < order.length; n++) {
+            var key = order[n];
+            try {
+                var req = tmdbBuildRequest(key, path);
+                var res = await fetchWithTimeout(req.url, { headers: req.headers }, 12000);
+                if (res.status === 401) { tmdbKeyBlockedUntil[key] = Date.now() + 10 * 60 * 1000; lastErr = TmdbError('INVALID_KEY', 'Chave inválida.'); continue; }
+                if (res.status === 429) {
+                    var wait = parseInt(res.headers.get('Retry-After') || '10', 10);
+                    tmdbKeyBlockedUntil[key] = Date.now() + Math.max(wait, 5) * 1000;
+                    lastErr = TmdbError('RATE_LIMIT', 'Limite de uso da chave atingido.');
+                    continue;
+                }
+                if (res.status >= 500) { lastErr = TmdbError('HTTP_' + res.status, 'Erro temporário da TMDB.'); continue; }
+                if (!res.ok) throw TmdbError('HTTP_' + res.status, 'Erro ' + res.status + ' da TMDB.');
+                data = await res.json();
+                lastErr = null;
+                break;
+            } catch (e) {
+                if (e && e.name === 'TmdbError' && /^HTTP_4/.test(e.code)) throw e; // erro do pedido (ex.: 404), não da chave
+                lastErr = (e && e.name === 'TmdbError') ? e : TmdbError('NETWORK', 'Sem resposta da TMDB (conexão lenta ou indisponível).');
+            }
+        }
+        if (lastErr) throw lastErr;
+    }
+
+    tmdbCache[path] = { t: Date.now(), data: data };
+    return data;
+}
+
+// Texto amigável para exibir ao usuário quando a busca falha
+function describeTmdbError(e) {
+    var code = e && e.code;
+    if (code === 'NO_KEYS') return 'Configure sua chave da API TMDB em Configurações (ícone da engrenagem).';
+    if (code === 'INVALID_KEY') return 'Chave da API inválida. Confira as chaves em Configurações.';
+    if (code === 'RATE_LIMIT') return 'Limite de uso atingido. Aguarde um instante ou adicione outra chave em Configurações.';
+    if (code === 'NETWORK') return 'A TMDB não respondeu. Verifique a internet e tente de novo.';
+    return 'Não foi possível buscar as informações. Tente novamente.';
+}
+
+// Testa uma chave (usado no botão "Testar chaves" das Configurações)
+async function testTmdbKey(key) {
+    try {
+        var req = tmdbBuildRequest(key, '/configuration');
+        var res = await fetchWithTimeout(req.url, { headers: req.headers }, 12000);
+        if (res.status === 401) return { ok: false, msg: 'Chave inválida' };
+        if (res.status === 429) return { ok: true, msg: 'Válida (limite de uso momentâneo)' };
+        if (!res.ok) return { ok: false, msg: 'Erro ' + res.status };
+        return { ok: true, msg: 'Chave válida' };
+    } catch (e) {
+        return { ok: false, msg: 'Sem resposta (verifique a internet)' };
+    }
+}
+
+// Detecta se existe o servidor opcional (server.js). No GitHub Pages não existe.
+function detectBackend() {
+    return fetchWithTimeout(API_BASE_URL + '/health', { cache: 'no-store' }, 2500)
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(j) { backendAvailable = !!(j && j.status === 'OK'); })
+        .catch(function() { backendAvailable = false; })
+        .then(function() { updateApiKeyNotice(); });
+}
+
+// Aviso na tela inicial quando não há nenhuma forma de buscar (sem chave e sem servidor)
+function updateApiKeyNotice() {
+    var el = document.getElementById('apiKeyNotice');
+    if (!el) return;
+    if (getTmdbKeys().length === 0 && !backendAvailable) el.classList.remove('hidden');
+    else el.classList.add('hidden');
+}
+
+// URL de imagem: direto da TMDB (com chaves/GitHub) ou via proxy do servidor
+function getTmdbImgUrl(path, size) {
+    if (!path) return null;
+    var fullUrl = TMDB_IMG_BASE + '/' + (size || 'w500') + path;
+    if (usingDirectTmdb()) return fullUrl;
+    return API_BASE_URL + '/api/image-proxy?url=' + encodeURIComponent(fullUrl);
+}
+
+let currentMode = null;
+let selectedContent = null;
+let currentFormat = 'post';
+let videoFormat = 'post';
+let uploadedLogo = null;
+let posterImage = null;
+let currentTrailer = null;
+let globalSettings = {
+    logo: null, whatsappText: '(00) 00000-0000', ctaText: 'ASSINA JÁ', instagramHandle: '@seuinstagram',
+    // Modo da marca d'água, aplicado de forma unificada em TODOS os geradores
+    // (banner estático, vídeo trailer e vídeo com texto livre):
+    // 'none'   = sem marca d'água
+    // 'corner' = só no canto superior direito
+    // 'full'   = padrão repetido no banner/vídeo inteiro + canto superior direito
+    watermarkMode: 'corner',
+    tmdbKeys: ['', '', ''],
+    boxCustom: {
+        instagram: { bg: null, text: null, icon: null },
+        whatsapp: { bg: null, text: null, icon: null },
+        cta: { bg: null, text: null, icon: null }
+    }
+};
+// Cache em memória dos ícones personalizados (Image já carregada), por box
+let customBoxIcons = { instagram: null, whatsapp: null, cta: null };
+
+// ============================================
+// PERSONALIZAÇÃO DOS BOXES (Instagram/WhatsApp/CTA)
+// Cada box pode ter: cor de fundo personalizada, cor do texto
+// personalizada e um ícone/logo personalizado (substitui o ícone padrão).
+// Quando algo não é personalizado, cai no padrão original.
+// ============================================
+// Boxes que o usuário escolheu ocultar (configuração por box). Os visíveis dividem a largura igualmente.
+function isBoxHidden(key) {
+    ensureBoxCustomDefaults();
+    return !!globalSettings.boxCustom[key].hidden;
+}
+
+function layoutBoxes(x, totalW, gap) {
+    var keys = ['instagram', 'whatsapp', 'cta'].filter(function(k) { return !isBoxHidden(k); });
+    var res = { n: keys.length, w: 0, pos: { instagram: null, whatsapp: null, cta: null } };
+    if (res.n === 0) return res;
+    res.w = Math.floor((totalW - gap * (res.n - 1)) / res.n);
+    keys.forEach(function(k, i) { res.pos[k] = x + i * (res.w + gap); });
+    return res;
+}
+
+function ensureBoxCustomDefaults() {
+    if (!globalSettings.boxCustom) globalSettings.boxCustom = {};
+    ['instagram', 'whatsapp', 'cta'].forEach(function(k) {
+        if (!globalSettings.boxCustom[k]) globalSettings.boxCustom[k] = { bg: null, text: null, icon: null, hidden: false };
+    });
+}
+
+// Aplica a cor de fundo personalizada (se houver) ou executa defaultSetFn() para o padrão
+function applyBoxBg(ctx, key, defaultSetFn) {
+    ensureBoxCustomDefaults();
+    var custom = globalSettings.boxCustom[key];
+    if (custom && custom.bg) { ctx.fillStyle = custom.bg; }
+    else { defaultSetFn(); }
+}
+
+// Retorna a cor do texto personalizada (se houver) ou o fallback padrão
+function getBoxTextColor(key, fallback) {
+    ensureBoxCustomDefaults();
+    var custom = globalSettings.boxCustom[key];
+    return (custom && custom.text) ? custom.text : (fallback || '#ffffff');
+}
+
+// Desenha o ícone personalizado (se houver) dentro do quadrado x,y,size,size;
+// caso contrário, executa defaultDrawFn(x,y,size) para o ícone padrão (pode ser null)
+function drawBoxIcon(ctx, key, x, y, size, defaultDrawFn) {
+    var icon = customBoxIcons[key];
+    if (icon) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, y, size, size);
+        ctx.clip();
+        var ir = icon.width / icon.height;
+        var dw, dh, dx, dy;
+        if (ir >= 1) { dh = size; dw = size * ir; dx = x - (dw - size) / 2; dy = y; }
+        else { dw = size; dh = size / ir; dx = x; dy = y - (dh - size) / 2; }
+        ctx.drawImage(icon, dx, dy, dw, dh);
+        ctx.restore();
+    } else if (defaultDrawFn) {
+        defaultDrawFn(ctx, x, y, size);
+    }
+}
+
+// ============================================
+// MARCA D'ÁGUA (logo) — modo unificado para TODOS os geradores.
+// Lê globalSettings.watermarkMode ('none' | 'corner' | 'full') e desenha:
+// - 'none'   -> nada
+// - 'corner' -> só a logo no canto informado (cornerX,cornerY,cornerW,cornerH)
+// - 'full'   -> padrão repetido e sutil dentro de tileX,tileY,tileW,tileH + a logo no canto
+// ============================================
+function applyWatermark(ctx, tileX, tileY, tileW, tileH, cornerX, cornerY, cornerW, cornerH) {
+    if (!uploadedLogo) return;
+    var mode = globalSettings.watermarkMode || 'corner';
+    if (mode === 'none') return;
+
+    if (mode === 'full') {
+        ctx.save();
+        ctx.globalAlpha = 0.10;
+        var pSize = 80; var logoR = uploadedLogo.width / uploadedLogo.height;
+        var pW = pSize * logoR; var pH = pSize; var spX = pW + 60; var spY = pH + 60;
+        ctx.beginPath();
+        ctx.rect(tileX, tileY, tileW, tileH);
+        ctx.clip();
+        var cx = tileX + tileW / 2, cy = tileY + tileH / 2;
+        ctx.translate(cx, cy); ctx.rotate(-30 * Math.PI / 180); ctx.translate(-cx, -cy);
+        for (var py = tileY - tileH; py < tileY + tileH * 2; py += spY) {
+            for (var px = tileX - tileW; px < tileX + tileW * 2; px += spX) {
+                ctx.drawImage(uploadedLogo, px, py, pW, pH);
+            }
+        }
+        ctx.restore();
+    }
+
+    // 'full' e 'corner' sempre mostram a logo no canto
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.drawImage(uploadedLogo, cornerX, cornerY, cornerW, cornerH);
+    ctx.restore();
+}
+
+// Redesenha a marca d'água POR CIMA do vídeo (chamado a cada frame da gravação,
+// já que o vídeo em reprodução cobre o que foi desenhado na camada estática).
+// Se o modo for 'corner', só a logo do canto precisa ser redesenhada.
+// Se for 'full', o padrão também precisa ser redesenhado (clicado à área do vídeo).
+function redrawWatermarkOverVideo(ctx, videoRectX, videoRectY, videoRectW, videoRectH, cornerX, cornerY, cornerW, cornerH) {
+    if (!uploadedLogo) return;
+    var mode = globalSettings.watermarkMode || 'corner';
+    if (mode === 'none') return;
+    applyWatermark(ctx, videoRectX, videoRectY, videoRectW, videoRectH, cornerX, cornerY, cornerW, cornerH);
+}
+
+// Encontra o MAIOR tamanho de fonte que ainda cabe em maxWidth (uma linha só),
+// para o texto preencher o máximo do espaço disponível dentro do box,
+// sem nunca ultrapassar a largura/altura do próprio box.
+function fitBoxFontSize(ctx, text, maxWidth, maxFontSize, minFontSize, weight, family) {
+    weight = weight || '700';
+    family = family || 'Manrope, sans-serif';
+    var fontSize = maxFontSize;
+    while (fontSize > minFontSize) {
+        ctx.font = weight + ' ' + fontSize + 'px ' + family;
+        if (ctx.measureText(text).width <= maxWidth) break;
+        fontSize--;
+    }
+    return fontSize;
+}
+
+let movieTypeFilter = 'both';
+let videoTypeFilter = 'both';
+
+let uploadedVideoFile = null;
+let uploadedVideoUrl = null;
+
+const homeScreen = document.getElementById('homeScreen');
+const editorScreen = document.getElementById('editorScreen');
+const controlPanel = document.getElementById('controlPanel');
+let canvas = document.getElementById('bannerCanvas');
+let ctx = canvas.getContext('2d');
+let videoContainer = document.getElementById('videoContainer');
+
+// ============================================
+// FFmpeg.wasm - usado APENAS quando o navegador
+// não consegue gravar MP4 nativamente (Firefox/Safari)
+// ============================================
+let ffmpegInstance = null;
+let ffmpegLoading = null;
+
+function ffmpegSupported() {
+    return typeof window !== 'undefined' && typeof window.FFmpeg !== 'undefined'
+        && typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated;
+}
+
+async function loadFFmpegOnce(onProgress) {
+    if (ffmpegInstance) return ffmpegInstance;
+    if (ffmpegLoading) return ffmpegLoading;
+    if (!ffmpegSupported()) {
+        throw new Error('FFmpeg.wasm não suportado neste navegador (SharedArrayBuffer indisponível).');
+    }
+    ffmpegLoading = (async function() {
+        var createFFmpeg = window.FFmpeg.createFFmpeg;
+        var inst = createFFmpeg({
+            log: false,
+            corePath: new URL('vendor/ffmpeg-core.js', document.baseURI).href,
+            progress: function(p) {
+                if (onProgress && typeof p.ratio === 'number') onProgress(p.ratio);
+            }
+        });
+        await inst.load();
+        ffmpegInstance = inst;
+        return inst;
+    })();
+    return ffmpegLoading;
+}
+
+// Detecção de suporte a MP4 nativo no MediaRecorder
+function detectNativeMp4Support() {
+    if (typeof MediaRecorder === 'undefined') return '';
+    var mp4Types = [
+        'video/mp4;codecs=avc1.640033,mp4a.40.2',
+        'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+        'video/mp4;codecs=avc1,mp4a',
+        'video/mp4'
+    ];
+    for (var i = 0; i < mp4Types.length; i++) {
+        if (MediaRecorder.isTypeSupported(mp4Types[i])) return mp4Types[i];
+    }
+    return '';
+}
+
+// ============================================
+// LOGO: agora é 100% via upload do dispositivo,
+// salva em base64 no localStorage (bannerGeneratorSettings.logo).
+// Não há mais tentativa de carregar logo.png de pastas do servidor
+// (a pasta antiga foi removida). Se não houver logo salva, o app
+// simplesmente fica sem logo até o usuário enviar uma em Configurações.
+// ============================================
+
+// ============================================
+// SETTINGS
+// ============================================
+function loadGlobalSettings() {
+    try {
+        var saved = localStorage.getItem('bannerGeneratorSettings');
+        if (saved) {
+            globalSettings = JSON.parse(saved);
+            if (!Array.isArray(globalSettings.tmdbKeys)) globalSettings.tmdbKeys = ['', '', ''];
+            for (var tk = 0; tk < 3; tk++) {
+                var tkEl = document.getElementById('settingsTmdbKey' + (tk + 1));
+                if (tkEl) tkEl.value = globalSettings.tmdbKeys[tk] || '';
+            }
+            console.log('✅ Configurações carregadas do localStorage:', {
+                logo: globalSettings.logo ? 'Presente (' + globalSettings.logo.length + ' chars)' : 'Ausente',
+                whatsapp: globalSettings.whatsappText,
+                cta: globalSettings.ctaText
+            });
+            if (globalSettings.logo) {
+                var img = new Image();
+                img.onload = function() { 
+                    uploadedLogo = img;
+                    console.log('✅ Logo carregada com sucesso:', img.width + 'x' + img.height);
+                };
+                img.onerror = function() {
+                    console.error('❌ Erro ao carregar logo do localStorage');
+                    // Remover logo corrompida
+                    globalSettings.logo = null;
+                    localStorage.setItem('bannerGeneratorSettings', JSON.stringify(globalSettings));
+                };
+                img.src = globalSettings.logo;
+                var slt = document.getElementById('settingsLogoText');
+                var slr = document.getElementById('settingsRemoveLogo');
+                if (slt) slt.textContent = 'Logo carregada';
+                if (slr) slr.classList.remove('hidden');
+            }
+            var w1 = document.getElementById('settingsInstagramHandle');
+            var w2 = document.getElementById('settingsWhatsappText');
+            var w3 = document.getElementById('settingsCtaText');
+            if (w1) w1.value = globalSettings.instagramHandle || '@seuinstagram';
+            if (w2) w2.value = globalSettings.whatsappText || '(00) 00000-0000';
+            if (w3) w3.value = globalSettings.ctaText || 'ASSINA JÁ';
+
+            var wmRadio = document.querySelector('input[name="watermarkMode"][value="' + (globalSettings.watermarkMode || 'corner') + '"]');
+            if (wmRadio) wmRadio.checked = true;
+
+            ensureBoxCustomDefaults();
+            loadBoxCustomizationUI();
+        } else {
+            console.log('ℹ️ Nenhuma configuração salva encontrada');
+            var wmRadioDefault = document.querySelector('input[name="watermarkMode"][value="corner"]');
+            if (wmRadioDefault) wmRadioDefault.checked = true;
+        }
+    } catch (e) { 
+        console.error('❌ Erro ao carregar configurações:', e); 
+    }
+}
+
+// Popula os controles de personalização dos 3 boxes a partir de globalSettings,
+// e carrega os ícones personalizados salvos (base64) em objetos Image na memória.
+var boxDefaultColors = {
+    instagram: { bg: '#dc2743', text: '#ffffff' },
+    whatsapp:  { bg: '#25D366', text: '#ffffff' },
+    cta:       { bg: '#ef4444', text: '#ffffff' }
+};
+function loadBoxCustomizationUI() {
+    ['instagram', 'whatsapp', 'cta'].forEach(function(key) {
+        var custom = globalSettings.boxCustom[key] || {};
+        var cap = key.charAt(0).toUpperCase() + key.slice(1);
+        var hideEl = document.getElementById('box' + cap + 'Hide');
+        if (hideEl) hideEl.checked = !!custom.hidden;
+
+        var bgOn = document.getElementById('box' + cap + 'BgOn');
+        var bgColor = document.getElementById('box' + cap + 'BgColor');
+        var textOn = document.getElementById('box' + cap + 'TextOn');
+        var textColor = document.getElementById('box' + cap + 'TextColor');
+        if (bgOn) bgOn.checked = !!custom.bg;
+        if (bgColor) bgColor.value = custom.bg || boxDefaultColors[key].bg;
+        if (textOn) textOn.checked = !!custom.text;
+        if (textColor) textColor.value = custom.text || boxDefaultColors[key].text;
+
+        if (custom.icon) {
+            var img = new Image();
+            img.onload = function() { customBoxIcons[key] = img; };
+            img.onerror = function() { customBoxIcons[key] = null; };
+            img.src = custom.icon;
+            var iconText = document.getElementById('box' + cap + 'IconText');
+            var iconRemove = document.getElementById('box' + cap + 'IconRemove');
+            if (iconText) iconText.textContent = 'Ícone personalizado carregado';
+            if (iconRemove) iconRemove.classList.remove('hidden');
+        } else {
+            customBoxIcons[key] = null;
+        }
+    });
+}
+
+// Configura o upload/remoção de ícone personalizado para um box (instagram/whatsapp/cta)
+function setupBoxIconUpload(key) {
+    var cap = key.charAt(0).toUpperCase() + key.slice(1);
+    var input = document.getElementById('box' + cap + 'IconInput');
+    var removeBtn = document.getElementById('box' + cap + 'IconRemove');
+    var textEl = document.getElementById('box' + cap + 'IconText');
+    if (!input) return;
+
+    input.addEventListener('change', function(e) {
+        var file = e.target.files[0];
+        if (!file) return;
+        if (file.size > 2 * 1024 * 1024) {
+            alert('A imagem é muito grande (máximo 2MB). Por favor, use uma imagem menor.');
+            return;
+        }
+        var reader = new FileReader();
+        reader.onload = function(ev) {
+            var img = new Image();
+            img.onload = function() {
+                var maxSize = 200;
+                var w = img.width, h = img.height;
+                if (w > maxSize || h > maxSize) {
+                    var ratio = Math.min(maxSize / w, maxSize / h);
+                    w = w * ratio; h = h * ratio;
+                }
+                var cnv = document.createElement('canvas');
+                cnv.width = w; cnv.height = h;
+                var cctx = cnv.getContext('2d');
+                cctx.drawImage(img, 0, 0, w, h);
+                var dataUrl = cnv.toDataURL('image/png'); // PNG para preservar transparência
+
+                ensureBoxCustomDefaults();
+                globalSettings.boxCustom[key].icon = dataUrl;
+                customBoxIcons[key] = img;
+
+                try {
+                    localStorage.setItem('bannerGeneratorSettings', JSON.stringify(globalSettings));
+                } catch (e2) {
+                    console.error('❌ Erro ao salvar ícone personalizado:', e2);
+                    if (e2.name === 'QuotaExceededError') alert('Erro: localStorage cheio. Tente usar uma imagem menor.');
+                }
+            };
+            img.src = ev.target.result;
+            if (textEl) textEl.textContent = file.name;
+            if (removeBtn) removeBtn.classList.remove('hidden');
+        };
+        reader.readAsDataURL(file);
+    });
+
+    if (removeBtn) {
+        removeBtn.addEventListener('click', function() {
+            ensureBoxCustomDefaults();
+            globalSettings.boxCustom[key].icon = null;
+            customBoxIcons[key] = null;
+            input.value = '';
+            if (textEl) textEl.textContent = 'Ícone/logo personalizado (opcional)';
+            removeBtn.classList.add('hidden');
+            try { localStorage.setItem('bannerGeneratorSettings', JSON.stringify(globalSettings)); } catch (e3) {}
+        });
+    }
+}
+['instagram', 'whatsapp', 'cta'].forEach(setupBoxIconUpload);
+
+function openSettings() { document.getElementById('settingsModal').classList.add('active'); }
+// Controles das chaves da API: mostrar/ocultar e "Testar chaves"
+function setupTmdbKeyControls() {
+    [1, 2, 3].forEach(function(n) {
+        var input = document.getElementById('settingsTmdbKey' + n);
+        var toggle = document.getElementById('settingsTmdbKeyToggle' + n);
+        if (input && toggle) {
+            toggle.addEventListener('click', function() {
+                var show = input.type === 'password';
+                input.type = show ? 'text' : 'password';
+                toggle.textContent = show ? 'Ocultar' : 'Mostrar';
+            });
+        }
+    });
+    var testBtn = document.getElementById('settingsTestKeys');
+    if (testBtn) {
+        testBtn.addEventListener('click', async function() {
+            testBtn.disabled = true;
+            var original = testBtn.textContent;
+            testBtn.textContent = 'Testando...';
+            for (var n = 1; n <= 3; n++) {
+                var input = document.getElementById('settingsTmdbKey' + n);
+                var status = document.getElementById('settingsTmdbKeyStatus' + n);
+                if (!input || !status) continue;
+                var key = input.value.trim();
+                if (!key) { status.textContent = ''; continue; }
+                status.className = 'text-xs text-zinc-400';
+                status.textContent = 'Testando...';
+                var r = await testTmdbKey(key);
+                status.className = 'text-xs ' + (r.ok ? 'text-green-400' : 'text-red-400');
+                status.textContent = (r.ok ? '\u2713 ' : '\u2717 ') + r.msg;
+            }
+            testBtn.textContent = original;
+            testBtn.disabled = false;
+        });
+    }
+}
+setupTmdbKeyControls();
+
+function closeSettings() { document.getElementById('settingsModal').classList.remove('active'); }
+
+document.getElementById('settingsModal').addEventListener('click', function(e) {
+    if (e.target === this) closeSettings();
+});
+
+function saveSettings() {
+    globalSettings.instagramHandle = document.getElementById('settingsInstagramHandle').value;
+    globalSettings.whatsappText = document.getElementById('settingsWhatsappText').value;
+    globalSettings.ctaText = document.getElementById('settingsCtaText').value;
+
+    // Chaves da API TMDB (até 3)
+    globalSettings.tmdbKeys = [1, 2, 3].map(function(n) {
+        var el = document.getElementById('settingsTmdbKey' + n);
+        return el ? el.value.trim() : '';
+    });
+    Object.keys(tmdbCache).forEach(function(k) { delete tmdbCache[k]; });
+    Object.keys(tmdbKeyBlockedUntil).forEach(function(k) { delete tmdbKeyBlockedUntil[k]; });
+    updateApiKeyNotice();
+    // Logo já foi atribuído a globalSettings.logo no event listener do input
+
+    // Modo da marca d'água, aplicado de forma unificada em todos os geradores
+    var wmChecked = document.querySelector('input[name="watermarkMode"]:checked');
+    globalSettings.watermarkMode = wmChecked ? wmChecked.value : 'corner';
+
+    // Personalização dos boxes (cor de fundo / cor do texto). Ícones já são
+    // salvos automaticamente no momento do upload (ver setupBoxIconUpload).
+    ensureBoxCustomDefaults();
+    ['instagram', 'whatsapp', 'cta'].forEach(function(key) {
+        var cap = key.charAt(0).toUpperCase() + key.slice(1);
+        var bgOn = document.getElementById('box' + cap + 'BgOn');
+        var bgColor = document.getElementById('box' + cap + 'BgColor');
+        var textOn = document.getElementById('box' + cap + 'TextOn');
+        var textColor = document.getElementById('box' + cap + 'TextColor');
+        var hideChk = document.getElementById('box' + cap + 'Hide');
+        globalSettings.boxCustom[key].hidden = !!(hideChk && hideChk.checked);
+        globalSettings.boxCustom[key].bg = (bgOn && bgOn.checked && bgColor) ? bgColor.value : null;
+        globalSettings.boxCustom[key].text = (textOn && textOn.checked && textColor) ? textColor.value : null;
+    });
+
+    localStorage.setItem('bannerGeneratorSettings', JSON.stringify(globalSettings));
+    console.log('✅ Configurações salvas:', {
+        logo: globalSettings.logo ? 'Presente' : 'Ausente',
+        instagram: globalSettings.instagramHandle,
+        whatsapp: globalSettings.whatsappText,
+        cta: globalSettings.ctaText
+    });
+    alert('Configurações salvas!');
+    closeSettings();
+}
+
+document.getElementById('settingsLogoInput').addEventListener('change', function(e) {
+    var file = e.target.files[0];
+    if (file) {
+        // Verificar tamanho do arquivo (max 2MB para localStorage)
+        if (file.size > 2 * 1024 * 1024) {
+            alert('A imagem é muito grande (máximo 2MB). Por favor, use uma imagem menor.');
+            return;
+        }
+        
+        var reader = new FileReader();
+        reader.onload = function(ev) {
+            // Comprimir imagem antes de salvar
+            var img = new Image();
+            img.onload = function() {
+                // Redimensionar se for muito grande
+                var maxWidth = 400;
+                var maxHeight = 400;
+                var width = img.width;
+                var height = img.height;
+                
+                if (width > maxWidth || height > maxHeight) {
+                    var ratio = Math.min(maxWidth / width, maxHeight / height);
+                    width = width * ratio;
+                    height = height * ratio;
+                }
+                
+                // Criar canvas para comprimir
+                var canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                var ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, width, height);
+                
+                // Detectar transparência: se algum pixel tiver alpha < 255, usar PNG
+                var hasTransparency = false;
+                try {
+                    var pixelData = ctx.getImageData(0, 0, width, height).data;
+                    for (var px = 3; px < pixelData.length; px += 4) {
+                        if (pixelData[px] < 255) { hasTransparency = true; break; }
+                    }
+                } catch(e) {}
+                
+                // Converter para data URL preservando transparência (PNG) ou comprimindo (JPEG)
+                var compressedDataUrl = hasTransparency
+                    ? canvas.toDataURL('image/png')
+                    : canvas.toDataURL('image/jpeg', 0.8);
+                
+                globalSettings.logo = compressedDataUrl;
+                uploadedLogo = img;
+                
+                // Salvar automaticamente no localStorage
+                try {
+                    localStorage.setItem('bannerGeneratorSettings', JSON.stringify(globalSettings));
+                    console.log('✅ Logo comprimida e salva automaticamente no localStorage');
+                } catch (e) {
+                    console.error('❌ Erro ao salvar logo no localStorage:', e);
+                    if (e.name === 'QuotaExceededError') {
+                        alert('Erro: localStorage cheio. Tente usar uma imagem menor.');
+                    }
+                }
+            };
+            img.onerror = function() {
+                console.error('❌ Erro ao carregar imagem da logo');
+            };
+            img.src = ev.target.result;
+            document.getElementById('settingsLogoText').textContent = file.name;
+            document.getElementById('settingsRemoveLogo').classList.remove('hidden');
+        };
+        reader.onerror = function() {
+            console.error('❌ Erro ao ler arquivo da logo');
+            alert('Erro ao ler o arquivo. Tente novamente.');
+        };
+        reader.readAsDataURL(file);
+    }
+});
+document.getElementById('settingsRemoveLogo').addEventListener('click', function() {
+    globalSettings.logo = null; uploadedLogo = null;
+    document.getElementById('settingsLogoInput').value = '';
+    document.getElementById('settingsLogoText').textContent = 'Carregar logo padrão';
+    document.getElementById('settingsRemoveLogo').classList.add('hidden');
+});
+
+// ============================================
+// NAVIGATION
+// ============================================
+function selectMode(mode) {
+    currentMode = mode;
+    homeScreen.classList.add('hidden');
+    editorScreen.classList.remove('hidden');
+    clearPreviousBanners();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    selectedContent = null;
+    if (mode === 'movies') loadMoviesMode();
+    else if (mode === 'video') loadVideoMode();
+    else if (mode === 'customvideo') loadCustomVideoMode();
+}
+
+function goHome() {
+    editorScreen.classList.add('hidden');
+    homeScreen.classList.remove('hidden');
+    clearPreviousBanners();
+    currentMode = null;
+    selectedContent = null;
+    posterImage = null;
+    currentTrailer = null;
+    if (uploadedVideoUrl) { try { URL.revokeObjectURL(uploadedVideoUrl); } catch(e) {} }
+    uploadedVideoFile = null;
+    uploadedVideoUrl = null;
+}
+
+function clearPreviousBanners() {
+    const container = document.getElementById('bannersContainer');
+    container.innerHTML = '<canvas id="bannerCanvas" class="canvas-glow max-w-full h-auto rounded-lg mx-auto"></canvas><div id="videoContainer" class="hidden flex flex-col items-center gap-4"></div>';
+    canvas = document.getElementById('bannerCanvas');
+    ctx = canvas.getContext('2d');
+    videoContainer = document.getElementById('videoContainer');
+}
+
+// ============================================
+// MOVIES MODE
+// ============================================
+async function loadMoviesMode() {
+    canvas.classList.remove('hidden');
+    videoContainer.classList.add('hidden');
+    movieTypeFilter = 'both';
+    platformColorOverride = null;
+    platformAutoFilled.moviePlatform = '';
+
+    controlPanel.innerHTML =
+        '<header class="border-b border-zinc-800 pb-5"><h2 class="font-oswald text-2xl font-bold text-red-400">Filmes e S\u00E9ries</h2></header>' +
+        '<section class="mt-5">' +
+            '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold block mb-3">Tipo de Conte\u00FAdo</label>' +
+            '<div class="flex gap-2">' +
+                '<button id="movieTypeBoth" class="flex-1 py-3 px-4 border font-semibold text-sm uppercase tracking-wider rounded bg-white text-black border-white" data-testid="movie-type-both">Ambos</button>' +
+                '<button id="movieTypeMovie" class="flex-1 py-3 px-4 border font-semibold text-sm uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800" data-testid="movie-type-movie">Filme</button>' +
+                '<button id="movieTypeTv" class="flex-1 py-3 px-4 border font-semibold text-sm uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800" data-testid="movie-type-tv">S\u00E9rie</button>' +
+            '</div>' +
+        '</section>' +
+        '<section class="mt-5">' +
+            '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold block mb-3">Buscar Filme ou S\u00E9rie</label>' +
+            '<div class="relative">' +
+                '<input type="text" id="movieSearch" placeholder="Digite o nome..." class="bg-black border-2 border-zinc-800 p-4 pr-14 text-white placeholder-zinc-600 focus:outline-none focus:border-red-500 w-full rounded-lg" data-testid="movie-search-input">' +
+            '</div>' +
+            '<div id="movieResults" class="mt-2 max-h-96 overflow-y-auto"></div>' +
+        '</section>' +
+        '<section id="movieControls" class="hidden flex flex-col gap-5 mt-5">' +
+            '<div id="movieSelectedInfo" class="border border-zinc-800 p-4 bg-black/30 rounded-lg"></div>' +
+            '<section class="flex flex-col gap-3"><label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold">Formato</label><div class="flex gap-2"><button id="movieFormatPost" class="flex-1 py-3 px-2 border font-semibold text-xs uppercase tracking-wider rounded bg-white text-black border-white">Post</button><button id="movieFormatStory" class="flex-1 py-3 px-2 border font-semibold text-xs uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800">Story</button><button id="movieFormatStatus" class="flex-1 py-3 px-2 border font-semibold text-xs uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800">Status</button></div><p id="movieFormatHint" class="text-xs text-zinc-500">1080x1350</p></section>' +
+            '<section class="flex flex-col gap-3"><label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold">Plataforma <span id="platformAutoText" class="text-green-400 text-xs normal-case"></span></label>' +
+            '<input type="text" id="moviePlatform" maxlength="30" autocomplete="off" placeholder="Autom\u00E1tico (ou digite um texto livre)" class="bg-black border border-zinc-800 p-4 text-white placeholder-zinc-600 focus:outline-none focus:border-red-500 w-full rounded"><div class="flex items-center gap-3"><label class="text-xs text-zinc-400 flex-1">Cor do texto da plataforma <span id="moviePlatformColorState" class="text-zinc-600">(padr\u00E3o)</span></label><input type="color" id="moviePlatformColor" value="#ef4444" class="w-10 h-8 rounded border border-zinc-700 bg-transparent cursor-pointer"><button type="button" id="moviePlatformColorReset" class="text-xs text-zinc-400 hover:text-white underline">Padr\u00E3o</button></div></section>' +
+            '<button id="movieDownloadBtn" class="w-full bg-red-500 text-white font-bold uppercase tracking-widest py-4 hover:bg-red-400 transition-all flex items-center justify-center gap-3 rounded-lg cursor-pointer" data-testid="movie-download-btn">BAIXAR BANNER FULL HD</button>' +
+        '</section>';
+
+    setTimeout(function() {
+        var searchTimeout;
+        document.getElementById('movieSearch').addEventListener('input', function(e) { clearTimeout(searchTimeout); searchTimeout = setTimeout(function() { searchMovies(e.target.value); }, 500); });
+        document.getElementById('movieFormatPost').addEventListener('click', function() { currentFormat = 'post'; updateMovieFormatButtons(); generateMovieBanner(); });
+        document.getElementById('movieFormatStory').addEventListener('click', function() { currentFormat = 'story'; updateMovieFormatButtons(); generateMovieBanner(); });
+        document.getElementById('movieFormatStatus').addEventListener('click', function() { currentFormat = 'status'; updateMovieFormatButtons(); generateMovieBanner(); });
+        setupPlatformColorControls('movie', generateMovieBanner);
+        var platformTypingTimeout;
+        document.getElementById('moviePlatform').addEventListener('input', function() { clearTimeout(platformTypingTimeout); platformTypingTimeout = setTimeout(generateMovieBanner, 200); });
+        document.getElementById('movieDownloadBtn').addEventListener('click', downloadMovieBanner);
+        document.getElementById('movieTypeBoth').addEventListener('click', function() { setMovieTypeFilter('both'); });
+        document.getElementById('movieTypeMovie').addEventListener('click', function() { setMovieTypeFilter('movie'); });
+        document.getElementById('movieTypeTv').addEventListener('click', function() { setMovieTypeFilter('tv'); });
+    }, 100);
+    showPlaceholder('\uD83C\uDFAC', 'FILMES', 'Busque um filme ou s\u00E9rie', '#7f1d1d', '#18181b');
+}
+
+function setMovieTypeFilter(type) {
+    movieTypeFilter = type;
+    var btns = { both: document.getElementById('movieTypeBoth'), movie: document.getElementById('movieTypeMovie'), tv: document.getElementById('movieTypeTv') };
+    Object.keys(btns).forEach(function(k) {
+        if (!btns[k]) return;
+        btns[k].className = (k === type)
+            ? 'flex-1 py-3 px-4 border font-semibold text-sm uppercase tracking-wider rounded bg-white text-black border-white'
+            : 'flex-1 py-3 px-4 border font-semibold text-sm uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800';
+    });
+    var inp = document.getElementById('movieSearch');
+    if (inp && inp.value.trim()) searchMovies(inp.value);
+}
+
+let movieSearchSeq = 0;
+async function searchMovies(query) {
+    var mySeq = ++movieSearchSeq;
+    if (!query.trim()) { document.getElementById('movieResults').innerHTML = ''; return; }
+    try {
+        var fetches = [];
+        if (movieTypeFilter === 'both' || movieTypeFilter === 'movie') {
+            fetches.push(tmdbApi('/search/movie?language=pt-BR&query=' + encodeURIComponent(query)));
+        } else { fetches.push(Promise.resolve({ results: [] })); }
+        if (movieTypeFilter === 'both' || movieTypeFilter === 'tv') {
+            fetches.push(tmdbApi('/search/tv?language=pt-BR&query=' + encodeURIComponent(query)));
+        } else { fetches.push(Promise.resolve({ results: [] })); }
+        var results = await Promise.all(fetches);
+        // Ignora esta resposta se o usuário já disparou uma busca mais recente
+        // (evita que uma resposta antiga/lenta sobrescreva o resultado atual)
+        if (mySeq !== movieSearchSeq) return;
+        var moviesData = results[0];
+        var seriesData = results[1];
+        var movies = (moviesData.results || []).slice(0, 20).map(function(m) { return { id: m.id, type: 'movie', title: m.title, year: m.release_date ? m.release_date.split('-')[0] : 'N/A', rating: m.vote_average ? m.vote_average.toFixed(1) : 'N/A', overview: m.overview || 'Sinopse n\u00E3o dispon\u00EDvel.', poster: m.poster_path ? getTmdbImgUrl(m.poster_path) : null, posterPath: m.poster_path || null }; });
+        var series = (seriesData.results || []).slice(0, 20).map(function(s) { return { id: s.id, type: 'tv', title: s.name, year: s.first_air_date ? s.first_air_date.split('-')[0] : 'N/A', rating: s.vote_average ? s.vote_average.toFixed(1) : 'N/A', overview: s.overview || 'Sinopse n\u00E3o dispon\u00EDvel.', poster: s.poster_path ? getTmdbImgUrl(s.poster_path) : null, posterPath: s.poster_path || null }; });
+        displayMovieResults(movies.concat(series));
+    } catch (error) {
+        if (mySeq !== movieSearchSeq) return;
+        console.error('Erro:', error);
+        document.getElementById('movieResults').innerHTML = '<p class="text-red-500 text-sm p-3">' + describeTmdbError(error) + '</p>';
+    }
+}
+
+function displayMovieResults(results) {
+    var resultsDiv = document.getElementById('movieResults');
+    if (results.length === 0) { resultsDiv.innerHTML = '<p class="text-zinc-500 text-sm p-3">Nenhum resultado</p>'; return; }
+    resultsDiv.innerHTML = results.map(function(item, index) {
+        return '<div class="search-result flex items-center gap-3 p-3 cursor-pointer border-b border-zinc-800 hover:bg-zinc-800/50 rounded" data-index="' + index + '">' +
+            (item.poster ? '<img src="' + item.poster + '" class="w-12 h-16 object-cover rounded">' : '<div class="w-12 h-16 bg-zinc-800 rounded flex items-center justify-center">\uD83C\uDFAC</div>') +
+            '<div class="flex-1 min-w-0"><p class="font-semibold text-sm truncate">' + item.title + '</p><p class="text-zinc-500 text-xs">' + item.year + ' - ' + (item.type === 'movie' ? 'Filme' : 'S\u00E9rie') + ' - ' + item.rating + '</p></div></div>';
+    }).join('');
+    window.movieSearchResults = results;
+    setTimeout(function() {
+        document.querySelectorAll('#movieResults .search-result').forEach(function(el) {
+            el.addEventListener('click', function() { selectMovie(window.movieSearchResults[parseInt(this.getAttribute('data-index'))]); });
+        });
+    }, 50);
+}
+
+async function selectMovie(movie) {
+    selectedContent = movie;
+    document.getElementById('movieResults').innerHTML = '';
+    document.getElementById('movieSearch').value = '';
+    var endpoint = movie.type === 'movie' ? 'movie' : 'tv';
+    try {
+        var details = await tmdbApi('/' + endpoint + '/' + movie.id + '?language=pt-BR');
+        selectedContent.genres = details.genres ? details.genres.map(function(g) { return g.name; }).join(', ') : 'N/A';
+        if (movie.type === 'movie') { selectedContent.runtime = details.runtime ? Math.floor(details.runtime / 60) + 'h ' + (details.runtime % 60) + 'min' : 'N/A'; selectedContent.seasons = null; }
+        else { selectedContent.runtime = details.episode_run_time && details.episode_run_time[0] ? details.episode_run_time[0] + 'min/ep' : 'N/A'; selectedContent.seasons = details.number_of_seasons ? details.number_of_seasons + ' temporada' + (details.number_of_seasons > 1 ? 's' : '') : null; }
+        var watchData = await tmdbApi('/' + endpoint + '/' + movie.id + '/watch');
+        var brProviders = (watchData.results && watchData.results.BR) ? (watchData.results.BR.flatrate || watchData.results.BR.ads || []) : [];
+        if (brProviders.length > 0) { selectedContent.autoProvider = matchPlatform(brProviders[0].provider_name) || brProviders[0].provider_name; document.getElementById('platformAutoText').textContent = '(Detectado: ' + selectedContent.autoProvider + ')'; applyAutoPlatform('moviePlatform', selectedContent.autoProvider); }
+        else { selectedContent.autoProvider = null; document.getElementById('platformAutoText').textContent = ''; applyAutoPlatform('moviePlatform', ''); }
+    } catch (e) { console.error('Erro:', e); }
+    if (movie.poster) { try { posterImage = await loadImage(movie.poster); } catch (e) { posterImage = null; } } else { posterImage = null; }
+    document.getElementById('movieControls').classList.remove('hidden');
+    document.getElementById('movieSelectedInfo').innerHTML = '<div class="flex gap-3 mb-3">' + (movie.poster ? '<img id="moviePosterPreview" src="' + movie.poster + '" class="w-20 h-30 object-cover rounded">' : '<img id="moviePosterPreview" class="w-20 h-30 object-cover rounded hidden">') + '<div class="flex-1"><h3 class="font-oswald text-lg font-bold">' + movie.title + '</h3><p class="text-zinc-500 text-sm">' + movie.year + ' - ' + (movie.type === 'movie' ? 'Filme' : 'S\u00E9rie') + ' - ' + movie.rating + '</p><p class="text-zinc-400 text-xs mt-2 line-clamp-3">' + movie.overview + '</p></div></div><div id="moviePosterPicker" class="mb-3"></div><button onclick="copyMovieInfo()" class="w-full bg-zinc-800 hover:bg-zinc-700 text-white text-sm font-semibold py-2 px-4 rounded-lg flex items-center justify-center gap-2">Copiar Informa\u00E7\u00F5es</button>';
+    loadPosterOptions(movie, 'moviePosterPicker', 'moviePosterPreview', function() { generateMovieBanner(); });
+    setTimeout(function() { generateMovieBanner(); }, 200);
+}
+
+// Cor do texto da plataforma escolhida pelo usuário (null = cores padrão de cada plataforma)
+let platformColorOverride = null;
+
+function setupPlatformColorControls(prefix, onChange) {
+    var input = document.getElementById(prefix + 'PlatformColor');
+    var reset = document.getElementById(prefix + 'PlatformColorReset');
+    var state = document.getElementById(prefix + 'PlatformColorState');
+    if (!input) return;
+    input.addEventListener('input', function() {
+        platformColorOverride = input.value;
+        if (state) state.textContent = '(personalizada)';
+        if (onChange) onChange();
+    });
+    if (reset) reset.addEventListener('click', function() {
+        platformColorOverride = null;
+        input.value = '#ef4444';
+        if (state) state.textContent = '(padr\u00E3o)';
+        if (onChange) onChange();
+    });
+}
+
+// Preenche o campo da plataforma com a detectada pelo sistema.
+// Só mexe no campo se ele estiver vazio ou ainda tiver o valor que o próprio sistema
+// preencheu antes; se o usuário digitou um texto livre, esse texto é mantido.
+let platformAutoFilled = { moviePlatform: '', videoPlatform: '' };
+function applyAutoPlatform(inputId, detected) {
+    var el = document.getElementById(inputId);
+    if (!el) return;
+    var current = (el.value || '').trim();
+    var lastAuto = platformAutoFilled[inputId] || '';
+    if (current === '' || current === lastAuto) {
+        el.value = detected || '';
+        platformAutoFilled[inputId] = detected || '';
+    }
+}
+
+// ============================================
+// FORMATOS / RESOLUÇÕES
+// post   = Post do feed | story = Story 9:16 | status = Status do WhatsApp (1230x2050)
+// ============================================
+var FORMAT_BUTTON_ON = 'flex-1 py-3 px-2 border font-semibold text-xs uppercase tracking-wider rounded bg-white text-black border-white';
+var FORMAT_BUTTON_OFF = 'flex-1 py-3 px-2 border font-semibold text-xs uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800';
+
+function getBannerSize(format) {
+    if (format === 'story')  return { w: 1080, h: 1920, scale: 1.5, isPost: false, label: '1080x1920', previewMax: '280px' };
+    if (format === 'status') return { w: 1230, h: 2050, scale: 1,   isPost: false, label: '1230x2050 \u00B7 Status do WhatsApp', previewMax: '280px' };
+    return { w: 1080, h: 1350, scale: 1.5, isPost: true, label: '1080x1350', previewMax: '400px' };
+}
+
+function getVideoSizeInfo(format) {
+    if (format === 'story')  return { W: 1080, H: 1920, label: '1080x1920 (9:16 Story)', title: '1080x1920 (9:16) \u2014 Formato Story', suffix: '_story', previewMax: '250px', resultMax: '350px' };
+    if (format === 'status') return { W: 1230, H: 2050, label: '1230x2050 (Status WhatsApp)', title: '1230x2050 \u2014 Status do WhatsApp', suffix: '_status', previewMax: '250px', resultMax: '350px' };
+    return { W: 1080, H: 1080, label: '1080x1080 (1:1 Post)', title: '1080x1080 (1:1) \u2014 Formato Post', suffix: '_post', previewMax: '350px', resultMax: '600px' };
+}
+
+function getVideoGenerateLabel() {
+    var s = getVideoSizeInfo(videoFormat);
+    return 'GERAR BANNER MP4 (' + s.W + 'x' + s.H + ')';
+}
+
+function styleFormatButtons(ids, active) {
+    ['post', 'story', 'status'].forEach(function(f) {
+        var el = document.getElementById(ids[f]);
+        if (el) el.className = (f === active) ? FORMAT_BUTTON_ON : FORMAT_BUTTON_OFF;
+    });
+}
+
+function setVideoGenerateButtonLabel(btnId) {
+    var btn = document.getElementById(btnId);
+    if (btn && !btn.disabled && !btn.querySelector('.spinner')) btn.textContent = getVideoGenerateLabel();
+}
+
+// Reduz o tamanho da fonte da linha de informações (nota • ano • gênero • duração • plataforma)
+// até ela caber em maxW, para não estourar a borda em formatos mais estreitos.
+function fitMetaFontSize(oc, parts, plat, sep, maxW, baseFS, minFS) {
+    for (var size = baseFS; size > minFS; size--) {
+        oc.font = '600 ' + size + 'px Manrope, sans-serif';
+        var sepW = oc.measureText(sep).width;
+        var w = 0;
+        for (var i = 0; i < parts.length; i++) { w += oc.measureText(parts[i].text).width + (i > 0 ? sepW : 0); }
+        if (plat) w += sepW + oc.measureText(plat).width;
+        if (w <= maxW) return size;
+    }
+    return minFS;
+}
+
+function getPlatformInputValue(id) {
+    var el = document.getElementById(id);
+    return el ? (el.value || '').trim() : '';
+}
+
+function matchPlatform(name) {
+    var map = { 'Netflix': 'Netflix', 'Amazon Prime Video': 'Prime Video', 'Prime Video': 'Prime Video', 'Disney Plus': 'Disney+', 'Disney+': 'Disney+', 'HBO Max': 'HBO Max', 'Max': 'Max', 'Apple TV Plus': 'Apple TV+', 'Apple TV+': 'Apple TV+', 'Paramount Plus': 'Paramount+', 'Paramount+': 'Paramount+', 'Globoplay': 'Globoplay', 'Star Plus': 'Star+', 'Star+': 'Star+', 'Crunchyroll': 'Crunchyroll', 'WPlay': 'WPlay', 'RushPlay': 'RushPlay' };
+    return map[name] || '';
+}
+
+function getPlatformColor(platform) {
+    if (platformColorOverride) return platformColorOverride;
+    var p = (platform || '').trim().toLowerCase();
+    if (p === 'wplay') return '#0CA77F';
+    if (p === 'rushplay') return '#ef4444';
+    return '#ef4444'; // default red
+}
+
+function drawPlatformText(c, platform, x, y, fontSize) {
+    if (!platform) return;
+    if (!platformColorOverride && (platform || '').trim().toLowerCase().replace(/\s+/g, '') === 'wplay/rushplay') {
+        // Draw "WPlay" in green, " / " in white, "RushPlay" in dark red
+        c.font = '600 ' + fontSize + 'px Manrope, sans-serif';
+        c.fillStyle = '#0CA77F';
+        c.fillText('WPlay', x, y);
+        var wplayW = c.measureText('WPlay').width;
+        c.fillStyle = 'rgba(255,255,255,0.6)';
+        c.fillText(' / ', x + wplayW, y);
+        var sepW = c.measureText(' / ').width;
+        c.fillStyle = '#ef4444';
+        c.fillText('RushPlay', x + wplayW + sepW, y);
+        return wplayW + sepW + c.measureText('RushPlay').width;
+    } else {
+        c.font = '600 ' + fontSize + 'px Manrope, sans-serif';
+        c.fillStyle = getPlatformColor(platform);
+        c.fillText(platform, x, y);
+        return c.measureText(platform).width;
+    }
+}
+
+window.copyMovieInfo = function() {
+    if (!selectedContent) return;
+    var durationText = selectedContent.type === 'movie' ? selectedContent.runtime : (selectedContent.seasons || selectedContent.runtime);
+    // Get platform from the appropriate selector
+    var platform = '';
+    if (currentMode === 'movies') {
+        platform = getPlatformInputValue('moviePlatform') || selectedContent.autoProvider || '';
+    } else if (currentMode === 'video') {
+        platform = getPlatformInputValue('videoPlatform') || selectedContent.autoProvider || '';
+    }
+    var info = '\uD83D\uDC8E: *' + selectedContent.title + '*\n\n' +
+    (selectedContent.type === 'movie' ? '\uD83C\uDFAC: Filme' : '\uD83D\uDCFA: S\u00E9rie') +
+    '\n\u2B50: ' + selectedContent.rating +
+    '\n\uD83D\uDCC5: ' + selectedContent.year +
+    '\n\uD83C\uDFAD: ' + (selectedContent.genres || 'N/A') +
+    '\n\u23F1\uFE0F: ' + (durationText || 'N/A') +
+    '\n\uD83D\uDCC1: ' + (platform || 'N/A') +
+    '\n\n' + (selectedContent.overview || 'Sem sinopse');
+    navigator.clipboard.writeText(info).then(function() { alert('Informa\u00E7\u00F5es copiadas!'); }).catch(function() { alert('Erro ao copiar'); });
+};
+
+function generateMovieBanner() {
+    if (!selectedContent || currentMode !== 'movies') return;
+    var size = getBannerSize(currentFormat);
+    var width = size.w;
+    var height = size.h;
+    canvas.width = width;
+    canvas.height = height;
+    canvas.style.maxWidth = size.previewMax;
+    canvas.style.display = 'block';
+    renderMovieBannerToCtx(ctx, width, height, size.isPost);
+}
+
+function updateMovieFormatButtons() {
+    styleFormatButtons({ post: 'movieFormatPost', story: 'movieFormatStory', status: 'movieFormatStatus' }, currentFormat);
+    var size = getBannerSize(currentFormat);
+    var hint = document.getElementById('movieFormatHint');
+    if (hint) hint.textContent = size.label;
+    var dl = document.getElementById('movieDownloadBtn');
+    if (dl) dl.textContent = currentFormat === 'status' ? 'BAIXAR BANNER 1230x2050' : 'BAIXAR BANNER FULL HD';
+}
+
+function downloadMovieBanner() {
+    if (!selectedContent) { alert('Selecione um filme ou s\u00E9rie primeiro!'); return; }
+    try {
+        var hdCanvas = document.createElement('canvas');
+        var bsize = getBannerSize(currentFormat);
+        var isPost = bsize.isPost;
+        var baseW = bsize.w;
+        var baseH = bsize.h;
+        // scale reduzido de 2x para 1.5x: 1080x1920 j\u00E1 \u00E9 Full HD;
+        // 2x virava 2160x3840 (quase 4K) e derrubava a aba no Safari iOS por falta de mem\u00F3ria
+        var scale = bsize.scale; // Status do WhatsApp sai exatamente em 1230x2050 (escala 1)
+        hdCanvas.width = baseW * scale;
+        hdCanvas.height = baseH * scale;
+        var hdCtx = hdCanvas.getContext('2d');
+        hdCtx.imageSmoothingEnabled = true;
+        hdCtx.imageSmoothingQuality = 'high';
+        hdCtx.scale(scale, scale);
+        renderMovieBannerToCtx(hdCtx, baseW, baseH, isPost);
+
+        var safeTitle = (selectedContent.title || 'banner').replace(/[^a-zA-Z0-9]/g, '_') || 'banner';
+        var fileName = safeTitle + '_' + currentFormat + (currentFormat === 'status' ? '_1230x2050.png' : '_FULLHD.png');
+
+        // toBlob em vez de toDataURL: evita manter uma string base64 gigante
+        // na mem\u00F3ria (principal causa de crash de aba em imagens grandes no iOS)
+        hdCanvas.toBlob(function(blob) {
+            try {
+                if (!blob) throw new Error('N\u00E3o foi poss\u00EDvel gerar a imagem (blob vazio).');
+                var url = URL.createObjectURL(blob);
+                var link = document.createElement('a');
+                link.download = fileName;
+                link.href = url;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                setTimeout(function() { URL.revokeObjectURL(url); }, 5000);
+            } catch (err2) {
+                console.error('Erro ao baixar banner:', err2);
+                alert('Erro ao baixar a imagem: ' + (err2 && err2.message ? err2.message : err2));
+            } finally {
+                hdCanvas.width = 0;
+                hdCanvas.height = 0;
+            }
+        }, 'image/png');
+    } catch (err) {
+        console.error('Erro ao baixar banner:', err);
+        alert('Erro ao baixar a imagem: ' + (err && err.message ? err.message : err) + '\n\nTente novamente ou tire um print desta mensagem para diagnosticar.');
+    }
+}
+
+function renderMovieBannerToCtx(c, width, height, isPost) {
+    c.imageSmoothingEnabled = true;
+    c.imageSmoothingQuality = 'high';
+    if (posterImage) {
+        var imgR = posterImage.width / posterImage.height;
+        var canR = width / height;
+        var dw, dh, ox, oy;
+        if (imgR > canR) { dh = height; dw = height * imgR; ox = (width - dw) / 2; oy = 0; }
+        else { dw = width; dh = width / imgR; ox = 0; oy = (height - dh) / 2; }
+        c.drawImage(posterImage, ox, oy, dw, dh);
+    } else { c.fillStyle = '#1a1a2e'; c.fillRect(0, 0, width, height); }
+    var gradient = c.createLinearGradient(0, height * 0.15, 0, height);
+    gradient.addColorStop(0, 'rgba(0,0,0,0)');
+    gradient.addColorStop(0.35, 'rgba(0,0,0,0.5)');
+    gradient.addColorStop(0.6, 'rgba(0,0,0,0.8)');
+    gradient.addColorStop(1, 'rgba(0,0,0,0.95)');
+    c.fillStyle = gradient;
+    c.fillRect(0, 0, width, height);
+    if (uploadedLogo) {
+        var cornerH = 240; var cornerW = cornerH * (uploadedLogo.width / uploadedLogo.height);
+        applyWatermark(c, 0, 0, width, height, width - cornerW - 25, 25, cornerW, cornerH);
+    }
+    var mPadding = 30; var footerY = height - mPadding; var boxH = 50; var boxGap = 12;
+    var bl = layoutBoxes(mPadding, width - mPadding * 2, boxGap); var boxW = bl.w;
+    var iconSize = 22; var iconPad = 10;
+    var maxBoxFont = Math.floor(boxH * 0.5); var minBoxFont = 11;
+    c.textAlign = 'center';
+    if (bl.pos.instagram !== null) {
+    var igX = bl.pos.instagram;
+    // Box Instagram (degradê laranja→rosa→roxo, ou cor personalizada)
+    applyBoxBg(c, 'instagram', function() {
+        var instaGrad = c.createLinearGradient(igX, footerY - boxH, igX + boxW, footerY);
+        instaGrad.addColorStop(0, '#f09433'); instaGrad.addColorStop(0.3, '#e6683c'); instaGrad.addColorStop(0.6, '#dc2743'); instaGrad.addColorStop(0.8, '#cc2366'); instaGrad.addColorStop(1, '#bc1888');
+        c.fillStyle = instaGrad;
+    });
+    roundRect(c, igX, footerY - boxH, boxW, boxH, 8); c.fill();
+    drawBoxIcon(c, 'instagram', igX + iconPad, footerY - boxH / 2 - iconSize / 2, iconSize, drawInstagramIcon);
+    var igTextMaxW = boxW - iconPad - iconSize - 12;
+    var igFontSize = fitBoxFontSize(c, globalSettings.instagramHandle, igTextMaxW, maxBoxFont, minBoxFont, '600', 'Manrope, sans-serif');
+    c.fillStyle = getBoxTextColor('instagram', '#fff'); c.font = '600 ' + igFontSize + 'px Manrope, sans-serif';
+    c.fillText(globalSettings.instagramHandle, igX + iconPad + iconSize + (boxW - iconPad - iconSize) / 2, footerY - boxH / 2 + Math.round(igFontSize * 0.32));
+    }
+    // Box WhatsApp (verde, ou cor personalizada)
+    if (bl.pos.whatsapp !== null) {
+    var wppX = bl.pos.whatsapp;
+    applyBoxBg(c, 'whatsapp', function() { c.fillStyle = '#25D366'; });
+    roundRect(c, wppX, footerY - boxH, boxW, boxH, 8); c.fill();
+    drawBoxIcon(c, 'whatsapp', wppX + iconPad, footerY - boxH / 2 - iconSize / 2, iconSize, drawWhatsAppIcon);
+    var wppTextMaxW = boxW - iconPad - iconSize - 12;
+    var wppFontSize = fitBoxFontSize(c, globalSettings.whatsappText, wppTextMaxW, maxBoxFont, minBoxFont, '600', 'Manrope, sans-serif');
+    c.fillStyle = getBoxTextColor('whatsapp', '#fff'); c.font = '600 ' + wppFontSize + 'px Manrope, sans-serif';
+    c.fillText(globalSettings.whatsappText, wppX + iconPad + iconSize + (boxW - iconPad - iconSize) / 2, footerY - boxH / 2 + Math.round(wppFontSize * 0.32));
+    }
+    // Box CTA (vermelho, ou cor personalizada) — se houver ícone personalizado, mostra ele à esquerda
+    if (bl.pos.cta !== null) {
+    var ctaX = bl.pos.cta;
+    applyBoxBg(c, 'cta', function() { c.fillStyle = '#ef4444'; });
+    roundRect(c, ctaX, footerY - boxH, boxW, boxH, 8); c.fill();
+    c.fillStyle = getBoxTextColor('cta', '#fff');
+    if (customBoxIcons.cta) {
+        drawBoxIcon(c, 'cta', ctaX + iconPad, footerY - boxH / 2 - iconSize / 2, iconSize, null);
+        var ctaTextMaxW = boxW - iconPad - iconSize - 12;
+        var ctaFontSize = fitBoxFontSize(c, globalSettings.ctaText, ctaTextMaxW, maxBoxFont, minBoxFont, '700', 'Manrope, sans-serif');
+        c.font = '700 ' + ctaFontSize + 'px Manrope, sans-serif';
+        c.fillText(globalSettings.ctaText, ctaX + iconPad + iconSize + (boxW - iconPad - iconSize) / 2, footerY - boxH / 2 + Math.round(ctaFontSize * 0.32));
+    } else {
+        var ctaTextMaxW2 = boxW - 16;
+        var ctaFontSize2 = fitBoxFontSize(c, globalSettings.ctaText, ctaTextMaxW2, maxBoxFont, minBoxFont, '700', 'Manrope, sans-serif');
+        c.font = '700 ' + ctaFontSize2 + 'px Manrope, sans-serif';
+        c.fillText(globalSettings.ctaText, ctaX + boxW / 2, footerY - boxH / 2 + Math.round(ctaFontSize2 * 0.32));
+    }
+    }
+    var currentY = bl.n ? footerY - boxH - 25 : footerY - 10;
+    var maxTextWidth = width - mPadding * 2;
+    c.font = '400 24px Manrope, sans-serif'; c.fillStyle = 'rgba(255,255,255,0.9)'; c.textAlign = 'left';
+    var maxLines = isPost ? 5 : 7;
+    var synLines = wrapText(c, selectedContent.overview, maxTextWidth).slice(0, maxLines);
+    currentY -= 10;
+    for (var si = synLines.length - 1; si >= 0; si--) { c.fillText(synLines[si], mPadding, currentY); currentY -= 32; }
+    currentY -= 15;
+    c.font = '600 24px Manrope, sans-serif';
+    var metaX = mPadding; var sep = '  \u2022  ';
+    c.fillStyle = '#eab308'; var rt = '\u2605 ' + selectedContent.rating; c.fillText(rt, metaX, currentY); metaX += c.measureText(rt).width;
+    c.fillStyle = 'rgba(255,255,255,0.6)'; c.fillText(sep, metaX, currentY); metaX += c.measureText(sep).width;
+    c.fillStyle = 'rgba(255,255,255,0.9)'; c.fillText(selectedContent.year, metaX, currentY); metaX += c.measureText(selectedContent.year).width;
+    if (selectedContent.genres !== 'N/A') { c.fillStyle = 'rgba(255,255,255,0.6)'; c.fillText(sep, metaX, currentY); metaX += c.measureText(sep).width; c.fillStyle = 'rgba(255,255,255,0.9)'; var gg = selectedContent.genres.split(',')[0].trim(); c.fillText(gg, metaX, currentY); metaX += c.measureText(gg).width; }
+    if (selectedContent.runtime !== 'N/A') { c.fillStyle = 'rgba(255,255,255,0.6)'; c.fillText(sep, metaX, currentY); metaX += c.measureText(sep).width; c.fillStyle = 'rgba(255,255,255,0.9)'; c.fillText(selectedContent.runtime, metaX, currentY); metaX += c.measureText(selectedContent.runtime).width; }
+    var plat = getPlatformInputValue('moviePlatform') || selectedContent.autoProvider;
+    if (plat) { c.fillStyle = 'rgba(255,255,255,0.6)'; c.fillText(sep, metaX, currentY); metaX += c.measureText(sep).width; var platW = drawPlatformText(c, plat, metaX, currentY, 24); metaX += platW; }
+    currentY -= 50;
+    c.font = '700 68px Oswald, sans-serif'; c.fillStyle = '#fff';
+    var titleLines = wrapText(c, selectedContent.title.toUpperCase(), maxTextWidth);
+    for (var ti = titleLines.length - 1; ti >= 0; ti--) { c.fillText(titleLines[ti], mPadding, currentY); currentY -= 75; }
+}
+// ============================================
+// VIDEO MODE (TRAILER MANUAL) - OTIMIZADO p/ WhatsApp
+// - Canvas 1080x1080 (1:1 square)
+// - Área de vídeo: 1080x607 (16:9 no topo)
+// - Chrome/Edge (MP4 nativo) → grava direto, pula FFmpeg (RÁPIDO)
+// - Firefox/Safari (só WebM) → FFmpeg ultrafast + fastdecode
+// - Camada estática cacheada + drawFrame travado em 30fps
+// ============================================
+async function loadVideoMode() {
+    videoTypeFilter = 'both';
+    platformColorOverride = null;
+    platformAutoFilled.videoPlatform = '';
+    uploadedVideoFile = null;
+    if (uploadedVideoUrl) { try { URL.revokeObjectURL(uploadedVideoUrl); } catch(e) {} }
+    uploadedVideoUrl = null;
+
+    var nativeMp4Type = detectNativeMp4Support();
+    var statusHtml;
+    if (nativeMp4Type) {
+        statusHtml = '<span class="text-green-400">\u26A1 MP4 nativo ativado (modo r\u00E1pido)</span>';
+    } else if (ffmpegSupported()) {
+        statusHtml = '<span class="text-green-400">\u2713 Convers\u00E3o WebM\u2192MP4 ativada</span>';
+    } else {
+        statusHtml = '<span class="text-yellow-400">\u26A0 Sem convers\u00E3o - v\u00EDdeo sair\u00E1 em WebM</span>';
+    }
+
+    controlPanel.innerHTML =
+        '<header class="border-b border-zinc-800 pb-5"><h2 class="font-oswald text-2xl font-bold text-purple-400">Trailer em Vídeo</h2><p class="text-zinc-500 text-sm mt-2">Carregue um vídeo MP4 e gere o banner otimizado para WhatsApp (1080x1080)</p><p class="text-xs mt-2">' + statusHtml + '</p></header>' +
+        '<section class="mt-5">' +
+            '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold block mb-3">Tipo de Conte\u00FAdo</label>' +
+            '<div class="flex gap-2">' +
+                '<button id="videoTypeBoth" class="flex-1 py-3 px-4 border font-semibold text-sm uppercase tracking-wider rounded bg-white text-black border-white" data-testid="video-type-both">Ambos</button>' +
+                '<button id="videoTypeMovie" class="flex-1 py-3 px-4 border font-semibold text-sm uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800" data-testid="video-type-movie">Filme</button>' +
+                '<button id="videoTypeTv" class="flex-1 py-3 px-4 border font-semibold text-sm uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800" data-testid="video-type-tv">S\u00E9rie</button>' +
+            '</div>' +
+        '</section>' +
+        '<section class="mt-5">' +
+            '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold block mb-3">Buscar Filme ou S\u00E9rie</label>' +
+            '<div class="relative">' +
+                '<input type="text" id="videoSearch" placeholder="Digite o nome..." class="bg-black border-2 border-zinc-800 p-4 pr-14 text-white placeholder-zinc-600 focus:outline-none focus:border-purple-500 w-full rounded-lg" data-testid="video-search-input">' +
+            '</div>' +
+            '<div id="videoResults" class="mt-2 max-h-96 overflow-y-auto"></div>' +
+        '</section>' +
+        '<section id="videoControls" class="hidden flex flex-col gap-5 mt-5">' +
+            '<div id="videoSelectedInfo" class="border border-zinc-800 p-4 bg-black/30 rounded-lg"></div>' +
+            '<div class="border-2 border-dashed border-purple-500/40 rounded-lg p-5 bg-purple-900/10">' +
+                '<label class="text-xs uppercase tracking-widest text-purple-300 font-semibold block mb-3">V\u00EDdeo MP4 (do dispositivo)</label>' +
+                '<label class="cursor-pointer flex flex-col items-center gap-2 hover:bg-purple-900/20 transition-colors p-4 rounded">' +
+                    '<svg class="w-10 h-10 text-purple-400" fill="currentColor" viewBox="0 0 256 256"><path d="M232,72H160V40a16,16,0,0,0-16-16H40A16,16,0,0,0,24,40V184a16,16,0,0,0,16,16H88v32a16,16,0,0,0,16,16H232a16,16,0,0,0,16-16V88A16,16,0,0,0,232,72ZM40,40H144V72H88a16,16,0,0,0-16,16v96H40Zm192,200H104V88H232V240Z"/></svg>' +
+                    '<span id="videoFileName" class="text-sm text-purple-200 font-semibold">Clique para escolher MP4</span>' +
+                    '<input type="file" id="videoFileInput" accept="video/mp4,video/*" class="hidden" data-testid="video-file-input">' +
+                '</label>' +
+                '<video id="videoPreview" class="w-full mt-3 rounded hidden" controls></video>' +
+            '</div>' +
+            '<section class="flex flex-col gap-2">' +
+                '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold">Formato</label>' +
+                '<div class="flex gap-2">' +
+                    '<button id="videoFormatPost" class="flex-1 py-3 px-2 border font-semibold text-xs uppercase tracking-wider rounded bg-white text-black border-white">Post (1:1)</button>' +
+                    '<button id="videoFormatStory" class="flex-1 py-3 px-2 border font-semibold text-xs uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800">Story (9:16)</button>' +
+                    '<button id="videoFormatStatus" class="flex-1 py-3 px-2 border font-semibold text-xs uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800">Status (1230x2050)</button>' +
+                '</div>' +
+            '</section>' +
+            '<section class="flex flex-col gap-2">' +
+                '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold">Qualidade Final (WhatsApp HD)</label>' +
+                '<select id="videoQuality" class="bg-black border border-zinc-800 p-3 text-white text-sm w-full rounded focus:outline-none focus:border-purple-500 appearance-none cursor-pointer">' +
+                    '<option value="high" selected>Alta (HD ~8 Mbps, WhatsApp HD garantido)</option>' +
+                    '<option value="medium">M\u00E9dia (~5 Mbps, bom equil\u00EDbrio)</option>' +
+                    '<option value="low">Baixa (~2.5 Mbps, m\u00E1xima economia)</option>' +
+                '</select>' +
+            '</section>' +
+            '<section class="flex flex-col gap-2">' +
+                '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold">Plataforma <span id="videoPlatformAutoText" class="text-green-400 text-xs normal-case"></span></label>' +
+                '<input type="text" id="videoPlatform" maxlength="30" autocomplete="off" placeholder="Autom\u00E1tico (ou digite um texto livre)" class="bg-black border border-zinc-800 p-3 text-white text-sm placeholder-zinc-600 w-full rounded focus:outline-none focus:border-purple-500">' +
+            '<div class="flex items-center gap-3"><label class="text-xs text-zinc-400 flex-1">Cor do texto da plataforma <span id="videoPlatformColorState" class="text-zinc-600">(padr\u00E3o)</span></label><input type="color" id="videoPlatformColor" value="#ef4444" class="w-10 h-8 rounded border border-zinc-700 bg-transparent cursor-pointer"><button type="button" id="videoPlatformColorReset" class="text-xs text-zinc-400 hover:text-white underline">Padr\u00E3o</button></div>' +
+            '</section>' +
+            '<button id="videoGenerateBtn" class="w-full bg-purple-500 text-white font-bold uppercase tracking-widest py-4 hover:bg-purple-400 transition-all flex items-center justify-center gap-3 rounded-lg cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed" disabled data-testid="video-generate-btn">GERAR BANNER MP4 (1080x1080)</button>' +
+            '<div id="videoProgressBox" class="hidden text-center"><p class="text-xs text-zinc-400 mb-2" id="videoProgressLabel">Gerando v\u00EDdeo...</p><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="videoProgressFill" class="h-full bg-purple-500 transition-all" style="width:0%"></div></div></div>' +
+        '</section>';
+
+    setTimeout(function() {
+        var searchTimeout;
+        document.getElementById('videoSearch').addEventListener('input', function(e) { clearTimeout(searchTimeout); searchTimeout = setTimeout(function() { searchVideos(e.target.value); }, 500); });
+        document.getElementById('videoTypeBoth').addEventListener('click', function() { setVideoTypeFilter('both'); });
+        document.getElementById('videoTypeMovie').addEventListener('click', function() { setVideoTypeFilter('movie'); });
+        document.getElementById('videoTypeTv').addEventListener('click', function() { setVideoTypeFilter('tv'); });
+        setupPlatformColorControls('video', null);
+        document.getElementById('videoFormatPost').addEventListener('click', function() { videoFormat = 'post'; updateVideoFormatButtons(); });
+        document.getElementById('videoFormatStory').addEventListener('click', function() { videoFormat = 'story'; updateVideoFormatButtons(); });
+        document.getElementById('videoFormatStatus').addEventListener('click', function() { videoFormat = 'status'; updateVideoFormatButtons(); });
+        document.getElementById('videoFileInput').addEventListener('change', handleVideoFileUpload);
+        document.getElementById('videoGenerateBtn').addEventListener('click', generateTrailerBannerVideo);
+    }, 100);
+
+    canvas.classList.add('hidden');
+    videoContainer.classList.remove('hidden');
+    videoContainer.innerHTML = '<div class="text-center p-12"><div class="text-8xl mb-6">\uD83C\uDFA5</div><h3 class="font-oswald text-3xl font-bold text-purple-400 mb-3">TRAILER EM V\u00CDEO</h3><p class="text-zinc-400 max-w-md mx-auto">1. Filtre por Filme/S\u00E9rie<br>2. Busque o t\u00EDtulo<br>3. Selecione o conte\u00FAdo<br>4. Carregue o v\u00EDdeo MP4 do dispositivo<br>5. Escolha qualidade e clique em <b>Gerar Banner MP4</b><br><br><span class="text-purple-400">\u2728 Formato 1080x1080 (1:1) otimizado para WhatsApp.<br>No Chrome/Edge o v\u00EDdeo \u00E9 gerado em MP4 nativo (sem recompress\u00E3o). Em outros navegadores, convertido automaticamente.</span></p></div>';
+}
+
+function setVideoTypeFilter(type) {
+    videoTypeFilter = type;
+    var btns = { both: document.getElementById('videoTypeBoth'), movie: document.getElementById('videoTypeMovie'), tv: document.getElementById('videoTypeTv') };
+    Object.keys(btns).forEach(function(k) {
+        if (!btns[k]) return;
+        btns[k].className = (k === type)
+            ? 'flex-1 py-3 px-4 border font-semibold text-sm uppercase tracking-wider rounded bg-white text-black border-white'
+            : 'flex-1 py-3 px-4 border font-semibold text-sm uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800';
+    });
+    var inp = document.getElementById('videoSearch');
+    if (inp && inp.value.trim()) searchVideos(inp.value);
+}
+
+function updateVideoFormatButtons() {
+    styleFormatButtons({ post: 'videoFormatPost', story: 'videoFormatStory', status: 'videoFormatStatus' }, videoFormat);
+    setVideoGenerateButtonLabel('videoGenerateBtn');
+}
+
+let videoSearchSeq = 0;
+async function searchVideos(query) {
+    var mySeq = ++videoSearchSeq;
+    if (!query.trim()) { document.getElementById('videoResults').innerHTML = ''; return; }
+    try {
+        var fetches = [];
+        if (videoTypeFilter === 'both' || videoTypeFilter === 'movie') {
+            fetches.push(tmdbApi('/search/movie?language=pt-BR&query=' + encodeURIComponent(query)));
+        } else { fetches.push(Promise.resolve({ results: [] })); }
+        if (videoTypeFilter === 'both' || videoTypeFilter === 'tv') {
+            fetches.push(tmdbApi('/search/tv?language=pt-BR&query=' + encodeURIComponent(query)));
+        } else { fetches.push(Promise.resolve({ results: [] })); }
+        var results = await Promise.all(fetches);
+        // Ignora esta resposta se o usuário já disparou uma busca mais recente
+        if (mySeq !== videoSearchSeq) return;
+        var moviesData = results[0];
+        var seriesData = results[1];
+        var movies = (moviesData.results || []).slice(0, 20).map(function(m) { return { id: m.id, type: 'movie', title: m.title, year: m.release_date ? m.release_date.split('-')[0] : 'N/A', rating: m.vote_average ? m.vote_average.toFixed(1) : 'N/A', overview: m.overview || '', poster: m.poster_path ? getTmdbImgUrl(m.poster_path) : null, posterPath: m.poster_path || null }; });
+        var series = (seriesData.results || []).slice(0, 20).map(function(s) { return { id: s.id, type: 'tv', title: s.name, year: s.first_air_date ? s.first_air_date.split('-')[0] : 'N/A', rating: s.vote_average ? s.vote_average.toFixed(1) : 'N/A', overview: s.overview || '', poster: s.poster_path ? getTmdbImgUrl(s.poster_path) : null, posterPath: s.poster_path || null }; });
+        displayVideoResults(movies.concat(series));
+    } catch (error) {
+        if (mySeq !== videoSearchSeq) return;
+        console.error('Erro:', error);
+        document.getElementById('videoResults').innerHTML = '<p class="text-red-500 text-sm p-3">' + describeTmdbError(error) + '</p>';
+    }
+}
+
+function displayVideoResults(results) {
+    var resultsDiv = document.getElementById('videoResults');
+    if (results.length === 0) { resultsDiv.innerHTML = '<p class="text-zinc-500 text-sm p-3">Nenhum resultado</p>'; return; }
+    resultsDiv.innerHTML = results.map(function(item, index) {
+        return '<div class="search-result flex items-center gap-3 p-3 cursor-pointer border-b border-zinc-800 hover:bg-zinc-800/50 rounded" data-index="' + index + '">' +
+            (item.poster ? '<img src="' + item.poster + '" class="w-12 h-16 object-cover rounded">' : '<div class="w-12 h-16 bg-zinc-800 rounded flex items-center justify-center">\uD83C\uDFAC</div>') +
+            '<div class="flex-1 min-w-0"><p class="font-semibold text-sm truncate">' + item.title + '</p><p class="text-zinc-500 text-xs">' + item.year + ' - ' + (item.type === 'movie' ? 'Filme' : 'S\u00E9rie') + '</p></div></div>';
+    }).join('');
+    window.videoSearchResults = results;
+    setTimeout(function() {
+        document.querySelectorAll('#videoResults .search-result').forEach(function(el) {
+            el.addEventListener('click', function() { selectVideoContent(window.videoSearchResults[parseInt(this.getAttribute('data-index'))]); });
+        });
+    }, 50);
+}
+
+async function selectVideoContent(content) {
+    selectedContent = content;
+    document.getElementById('videoResults').innerHTML = '';
+    document.getElementById('videoSearch').value = '';
+    document.getElementById('videoControls').classList.remove('hidden');
+
+    var endpoint = content.type === 'movie' ? 'movie' : 'tv';
+    try {
+        var details = await tmdbApi('/' + endpoint + '/' + content.id + '?language=pt-BR');
+        selectedContent.genres = details.genres ? details.genres.map(function(g) { return g.name; }).join(', ') : 'N/A';
+        if (content.type === 'movie') { selectedContent.runtime = details.runtime ? Math.floor(details.runtime / 60) + 'h ' + (details.runtime % 60) + 'min' : 'N/A'; selectedContent.seasons = null; }
+        else { selectedContent.runtime = details.episode_run_time && details.episode_run_time[0] ? details.episode_run_time[0] + 'min/ep' : 'N/A'; selectedContent.seasons = details.number_of_seasons ? details.number_of_seasons + ' temporada' + (details.number_of_seasons > 1 ? 's' : '') : null; }
+        var watchData = await tmdbApi('/' + endpoint + '/' + content.id + '/watch');
+        var brProviders = (watchData.results && watchData.results.BR) ? (watchData.results.BR.flatrate || watchData.results.BR.ads || []) : [];
+        if (brProviders.length > 0) {
+            selectedContent.autoProvider = matchPlatform(brProviders[0].provider_name) || brProviders[0].provider_name;
+            var vpAuto = document.getElementById('videoPlatformAutoText');
+            if (vpAuto) vpAuto.textContent = '(Detectado: ' + selectedContent.autoProvider + ')';
+            applyAutoPlatform('videoPlatform', selectedContent.autoProvider);
+        } else {
+            selectedContent.autoProvider = null;
+            applyAutoPlatform('videoPlatform', '');
+            var vpAuto2 = document.getElementById('videoPlatformAutoText');
+            if (vpAuto2) vpAuto2.textContent = '';
+        }
+    } catch (e) { console.error('Erro detalhes:', e); }
+
+    posterImage = null;
+    if (content.poster) {
+        try { posterImage = await loadImage(content.poster); } catch (e) { posterImage = null; }
+    }
+
+    document.getElementById('videoSelectedInfo').innerHTML =
+        '<div class="flex gap-3 mb-3">' +
+            (content.poster ? '<img id="videoPosterPreview" src="' + content.poster + '" class="w-20 h-30 object-cover rounded">' : '<img id="videoPosterPreview" class="w-20 h-30 object-cover rounded hidden">') +
+            '<div class="flex-1"><h3 class="font-oswald text-lg font-bold">' + content.title + '</h3>' +
+            '<p class="text-zinc-500 text-sm">' + content.year + ' - ' + (content.type === 'movie' ? 'Filme' : 'S\u00E9rie') + ' - \u2605 ' + content.rating + '</p>' +
+            (selectedContent.genres ? '<p class="text-zinc-400 text-xs mt-1">' + selectedContent.genres + '</p>' : '') +
+            (selectedContent.autoProvider ? '<p class="text-green-400 text-xs mt-1">Plataforma: ' + selectedContent.autoProvider + '</p>' : '') +
+            '</div></div>' +
+        '<div id="videoPosterPicker" class="mb-3"></div>' +
+        '<button onclick="copyMovieInfo()" class="w-full bg-zinc-800 hover:bg-zinc-700 text-white text-sm font-semibold py-2 px-4 rounded-lg flex items-center justify-center gap-2" data-testid="video-copy-info-btn">Copiar Informa\u00E7\u00F5es</button>';
+
+    updateGenerateBtnState();
+    loadPosterOptions(content, 'videoPosterPicker', 'videoPosterPreview', null);
+}
+
+function handleVideoFileUpload(e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    if (uploadedVideoUrl) { try { URL.revokeObjectURL(uploadedVideoUrl); } catch(err) {} }
+    uploadedVideoFile = file;
+    uploadedVideoUrl = URL.createObjectURL(file);
+    document.getElementById('videoFileName').textContent = file.name;
+    var prev = document.getElementById('videoPreview');
+    prev.src = uploadedVideoUrl;
+    prev.classList.remove('hidden');
+    updateGenerateBtnState();
+}
+
+function updateGenerateBtnState() {
+    var btn = document.getElementById('videoGenerateBtn');
+    if (!btn) return;
+    btn.disabled = !(selectedContent && uploadedVideoFile);
+}
+// ============================================
+// RENDER ESTÁTICO (cache) — só desenhado UMA vez
+// Canvas 1080x1080 (1:1 square)
+// Layout: Vídeo no topo (16:9) + Informações organizadas abaixo
+// ============================================
+function renderStaticBannerLayer(oc, W, H, videoAreaH) {
+    // Fundo total (preto)
+    oc.fillStyle = '#000';
+    oc.fillRect(0, 0, W, H);
+
+    // Área do vídeo (topo) - será preenchida pelo drawFrame
+    oc.fillStyle = '#000';
+    oc.fillRect(0, 0, W, videoAreaH);
+
+    // Área de informações (inferior) - fundo gradiente
+    var infoAreaY = videoAreaH;
+    var infoAreaH = H - videoAreaH;
+    
+    var bgGrad = oc.createLinearGradient(0, infoAreaY, 0, H);
+    bgGrad.addColorStop(0, '#0a0a0a');
+    bgGrad.addColorStop(1, '#050505');
+    oc.fillStyle = bgGrad;
+    oc.fillRect(0, infoAreaY, W, infoAreaH);
+
+    // Marca d'água (logo) — modo unificado (none/corner/full), canto superior direito do vídeo
+    if (uploadedLogo) {
+        var logoR = uploadedLogo.width / uploadedLogo.height;
+        var logoH = 140;
+        var logoW = logoH * logoR;
+        if (logoW > 320) { logoW = 320; logoH = logoW / logoR; }
+        applyWatermark(oc, 0, 0, W, H, W - logoW - 25, 10, logoW, logoH);
+    }
+
+    // ======== INFO AREA: poster ESQUERDA + conteúdo DIREITA ========
+    var pad = 40;
+    // Reserva o espaço necessário para os boxes (Instagram/WhatsApp/CTA) no rodapé
+    // e limita a altura do poster para que ele nunca fique por baixo/atrás dos boxes.
+    var reservedBtnH = 55, reservedBtnBottomMargin = 30, reservedGapBeforeButtons = 20;
+    var maxPosterH = infoAreaH - pad - reservedBtnH - reservedBtnBottomMargin - reservedGapBeforeButtons;
+    var posterH = Math.min(315, maxPosterH);
+    var posterW = Math.round(posterH * (210 / 315));
+    var posterX = pad;
+    var posterY = infoAreaY + pad;
+    var contentX = posterX + posterW + 30;
+    var contentMaxW = W - contentX - pad;
+
+    // Poster do filme (à esquerda)
+    if (posterImage) {
+        var pR = posterImage.width / posterImage.height;
+        var aR2 = posterW / posterH;
+        oc.save();
+        oc.beginPath();
+        roundRect(oc, posterX, posterY, posterW, posterH, 12);
+        oc.clip();
+        if (pR > aR2) {
+            var dh2 = posterH; var dw2 = posterH * pR;
+            oc.drawImage(posterImage, posterX - (dw2 - posterW) / 2, posterY, dw2, dh2);
+        } else {
+            var dw3 = posterW; var dh3 = posterW / pR;
+            oc.drawImage(posterImage, posterX, posterY - (dh3 - posterH) / 2, dw3, dh3);
+        }
+        oc.restore();
+        
+        // Borda sutil no poster
+        oc.strokeStyle = 'rgba(255,255,255,0.1)';
+        oc.lineWidth = 2;
+        oc.beginPath();
+        roundRect(oc, posterX, posterY, posterW, posterH, 12);
+        oc.stroke();
+    } else {
+        oc.fillStyle = '#1a1a1a';
+        roundRect(oc, posterX, posterY, posterW, posterH, 12);
+        oc.fill();
+    }
+
+    // Calcula a altura total do conteúdo (alinhado ao TOPO do poster, não mais centralizado)
+    oc.font = '700 48px Oswald, sans-serif';
+    var titleLines = wrapText(oc, selectedContent.title.toUpperCase(), contentMaxW).slice(0, 2);
+    var titleBlockH = titleLines.length * 55;
+
+    var metaParts = [];
+    if (selectedContent.rating && selectedContent.rating !== 'N/A') metaParts.push({ text: '\u2605 ' + selectedContent.rating, color: '#eab308' });
+    if (selectedContent.year && selectedContent.year !== 'N/A') metaParts.push({ text: selectedContent.year, color: 'rgba(255,255,255,0.9)' });
+    if (selectedContent.genres && selectedContent.genres !== 'N/A') metaParts.push({ text: selectedContent.genres.split(',')[0].trim(), color: 'rgba(255,255,255,0.9)' });
+    if (selectedContent.runtime && selectedContent.runtime !== 'N/A') metaParts.push({ text: selectedContent.runtime, color: 'rgba(255,255,255,0.9)' });
+    var plat = getPlatformInputValue('videoPlatform') || selectedContent.autoProvider;
+    var metaBlockH = 22;
+
+    oc.font = '400 20px Manrope, sans-serif';
+    var synLines = wrapText(oc, selectedContent.overview || '', contentMaxW).slice(0, 5);
+    var synBlockH = synLines.length * 28;
+
+    var gap1 = 10, gap2 = 30;
+    var totalContentH = titleBlockH + gap1 + metaBlockH + gap2 + synBlockH;
+    var curY = posterY;
+
+    // Título
+    oc.textAlign = 'left';
+    oc.font = '700 48px Oswald, sans-serif';
+    oc.fillStyle = '#fff';
+    oc.shadowColor = 'rgba(0,0,0,0.8)';
+    oc.shadowBlur = 10;
+    curY += 48;
+    for (var ti2 = 0; ti2 < titleLines.length; ti2++) {
+        oc.fillText(titleLines[ti2], contentX, curY);
+        curY += 55;
+    }
+    oc.shadowBlur = 0;
+
+    // Meta
+    curY += gap1;
+    var sep = '  \u2022  ';
+    var metaFS = fitMetaFontSize(oc, metaParts, plat, sep, contentMaxW, 24, 14);
+    oc.font = '600 ' + metaFS + 'px Manrope, sans-serif';
+    var metaCursorX = contentX;
+    for (var mi = 0; mi < metaParts.length; mi++) {
+        if (mi > 0) {
+            oc.fillStyle = 'rgba(255,255,255,0.6)';
+            oc.fillText(sep, metaCursorX, curY);
+            metaCursorX += oc.measureText(sep).width;
+        }
+        oc.fillStyle = metaParts[mi].color;
+        oc.fillText(metaParts[mi].text, metaCursorX, curY);
+        metaCursorX += oc.measureText(metaParts[mi].text).width;
+    }
+    // Platform (with special colors for WPlay/RushPlay)
+    if (plat) {
+        oc.fillStyle = 'rgba(255,255,255,0.6)';
+        oc.fillText(sep, metaCursorX, curY);
+        metaCursorX += oc.measureText(sep).width;
+        var platW = drawPlatformText(oc, plat, metaCursorX, curY, metaFS);
+        metaCursorX += platW;
+    }
+
+    // Sinopse
+    curY += gap2;
+    oc.font = '400 20px Manrope, sans-serif';
+    oc.fillStyle = 'rgba(255,255,255,0.8)';
+    for (var sj2 = 0; sj2 < synLines.length; sj2++) {
+        oc.fillText(synLines[sj2], contentX, curY);
+        curY += 28;
+    }
+
+    // Botões Instagram + WhatsApp + CTA (3 boxes lado a lado, ícone esquerda / texto direita)
+    // Preenchem a largura TOTAL do banner (padronizado igual ao Story)
+    var btnH = 55, btnGap = 12;
+    var btnW2 = Math.floor((W - pad * 2 - btnGap * 2) / 3);
+    var btnY = H - btnH - 30;
+    var vIconSize = 24; var vIconPad = 12;
+    var vMaxBoxFont = Math.floor(btnH * 0.5); var vMinBoxFont = 12;
+    oc.textAlign = 'center';
+
+    var bl = layoutBoxes(pad, W - pad * 2, btnGap); btnW2 = bl.w;
+    if (bl.pos.instagram !== null) {
+    var igX = bl.pos.instagram;
+    // Botão Instagram (degradê laranja→rosa→roxo, ou personalizado)
+    applyBoxBg(oc, 'instagram', function() {
+        var instaGrad = oc.createLinearGradient(igX, btnY, igX + btnW2, btnY + btnH);
+        instaGrad.addColorStop(0, '#f09433'); instaGrad.addColorStop(0.3, '#e6683c'); instaGrad.addColorStop(0.6, '#dc2743'); instaGrad.addColorStop(0.8, '#cc2366'); instaGrad.addColorStop(1, '#bc1888');
+        oc.fillStyle = instaGrad;
+    });
+    roundRect(oc, igX, btnY, btnW2, btnH, 10);
+    oc.fill();
+    drawBoxIcon(oc, 'instagram', igX + vIconPad, btnY + btnH / 2 - vIconSize / 2, vIconSize, drawInstagramIcon);
+    var igMaxW = btnW2 - vIconPad - vIconSize - 14;
+    var igFS = fitBoxFontSize(oc, globalSettings.instagramHandle, igMaxW, vMaxBoxFont, vMinBoxFont, '700', 'Manrope, sans-serif');
+    oc.fillStyle = getBoxTextColor('instagram', '#fff');
+    oc.font = '700 ' + igFS + 'px Manrope, sans-serif';
+    oc.fillText(globalSettings.instagramHandle, igX + vIconPad + vIconSize + (btnW2 - vIconPad - vIconSize) / 2, btnY + btnH / 2 + Math.round(igFS * 0.32));
+
+    }
+    // Botão WhatsApp (centro, ou personalizado)
+    if (bl.pos.whatsapp !== null) {
+    var wppBtnX = bl.pos.whatsapp;
+    applyBoxBg(oc, 'whatsapp', function() { oc.fillStyle = '#25D366'; });
+    roundRect(oc, wppBtnX, btnY, btnW2, btnH, 10);
+    oc.fill();
+    drawBoxIcon(oc, 'whatsapp', wppBtnX + vIconPad, btnY + btnH / 2 - vIconSize / 2, vIconSize, drawWhatsAppIcon);
+    var wppMaxW = btnW2 - vIconPad - vIconSize - 14;
+    var wppFS = fitBoxFontSize(oc, globalSettings.whatsappText, wppMaxW, vMaxBoxFont, vMinBoxFont, '700', 'Manrope, sans-serif');
+    oc.fillStyle = getBoxTextColor('whatsapp', '#fff');
+    oc.font = '700 ' + wppFS + 'px Manrope, sans-serif';
+    oc.fillText(globalSettings.whatsappText, wppBtnX + vIconPad + vIconSize + (btnW2 - vIconPad - vIconSize) / 2, btnY + btnH / 2 + Math.round(wppFS * 0.32));
+
+    }
+    // Botão CTA (direita, ou personalizado — com ícone se enviado)
+    if (bl.pos.cta !== null) {
+    var btnX2 = bl.pos.cta;
+    applyBoxBg(oc, 'cta', function() { oc.fillStyle = '#ef4444'; });
+    roundRect(oc, btnX2, btnY, btnW2, btnH, 10);
+    oc.fill();
+    oc.fillStyle = getBoxTextColor('cta', '#fff');
+    if (customBoxIcons.cta) {
+        drawBoxIcon(oc, 'cta', btnX2 + vIconPad, btnY + btnH / 2 - vIconSize / 2, vIconSize, null);
+        var ctaMaxW = btnW2 - vIconPad - vIconSize - 14;
+        var ctaFS = fitBoxFontSize(oc, globalSettings.ctaText, ctaMaxW, vMaxBoxFont, vMinBoxFont, '800', 'Manrope, sans-serif');
+        oc.font = '800 ' + ctaFS + 'px Manrope, sans-serif';
+        oc.fillText(globalSettings.ctaText, btnX2 + vIconPad + vIconSize + (btnW2 - vIconPad - vIconSize) / 2, btnY + btnH / 2 + Math.round(ctaFS * 0.32));
+    } else {
+        var ctaMaxW2 = btnW2 - 20;
+        var ctaFS2 = fitBoxFontSize(oc, globalSettings.ctaText, ctaMaxW2, vMaxBoxFont, vMinBoxFont, '800', 'Manrope, sans-serif');
+        oc.font = '800 ' + ctaFS2 + 'px Manrope, sans-serif';
+        oc.fillText(globalSettings.ctaText, btnX2 + btnW2 / 2, btnY + btnH / 2 + Math.round(ctaFS2 * 0.32));
+    }
+
+    }
+    oc.textAlign = 'left';
+}
+
+// ============================================
+// RENDER ESTÁTICO STORY (cache) — 1080x1920 (9:16 vertical)
+// Mesmo padrão do Post: Vídeo no topo + Informações embaixo + Boxes no rodapé
+// ============================================
+function renderStaticStoryLayer(oc, W, H, videoAreaH) {
+    // Fundo total (preto)
+    oc.fillStyle = '#000';
+    oc.fillRect(0, 0, W, H);
+
+    // ===== LAYOUT STORY: Logo no topo + Vídeo centralizado no meio + Info embaixo =====
+
+    // --- Posicionamento: Centro do video deslocado para cima (calculado ANTES da logo) ---
+    var videoCenterY = Math.round(H * 0.44); // Centro deslocado para cima
+    var videoY = videoCenterY - Math.floor(videoAreaH / 2);
+
+    var infoAreaY = videoY + videoAreaH;
+    var infoAreaH = H - infoAreaY;
+
+    // Área do vídeo (preto base - será preenchida pelo drawFrame)
+    // IMPORTANTE: isso precisa vir ANTES da marca d'água, senão o preenchimento
+    // preto apaga o padrão da marca d'água dentro da área do vídeo (modo "full").
+    oc.fillStyle = '#000';
+    oc.fillRect(0, videoY, W, videoAreaH);
+
+    // --- Marca d'água (logo) — modo unificado (none/corner/full), canto superior direito do vídeo ---
+    // (mesmo padrão de posicionamento usado no formato Post, só que relativo à área do vídeo no Story)
+    if (uploadedLogo) {
+        var logoR = uploadedLogo.width / uploadedLogo.height;
+        var logoH = 140;
+        var logoW = logoH * logoR;
+        if (logoW > 320) { logoW = 320; logoH = logoW / logoR; }
+        applyWatermark(oc, 0, 0, W, H, W - logoW - 25, videoY + 10, logoW, logoH);
+    }
+
+    // --- ÁREA DE INFORMAÇÕES (abaixo do vídeo) ---
+
+    // Fundo gradiente para a área de informações
+    var bgGrad = oc.createLinearGradient(0, infoAreaY, 0, H);
+    bgGrad.addColorStop(0, '#0a0a0a');
+    bgGrad.addColorStop(1, '#050505');
+    oc.fillStyle = bgGrad;
+    oc.fillRect(0, infoAreaY, W, infoAreaH);
+
+    // ======== INFO AREA: poster ESQUERDA + conteúdo DIREITA ========
+    var pad = 60;
+    var posterW = 230, posterH = 300; // Poster compacto para caber com video centralizado
+    var posterX = pad;
+    var posterY = infoAreaY + 20; // Compacto para dar mais espaço
+    var contentX = posterX + posterW + 40;
+    var contentMaxW = W - contentX - pad;
+
+    // Poster do filme (à esquerda)
+    if (posterImage) {
+        var pR = posterImage.width / posterImage.height;
+        var aR2 = posterW / posterH;
+        oc.save();
+        oc.beginPath();
+        roundRect(oc, posterX, posterY, posterW, posterH, 16);
+        oc.clip();
+        if (pR > aR2) {
+            var dh2 = posterH; var dw2 = posterH * pR;
+            oc.drawImage(posterImage, posterX - (dw2 - posterW) / 2, posterY, dw2, dh2);
+        } else {
+            var dw3 = posterW; var dh3 = posterW / pR;
+            oc.drawImage(posterImage, posterX, posterY - (dh3 - posterH) / 2, dw3, dh3);
+        }
+        oc.restore();
+
+        // Borda sutil no poster
+        oc.strokeStyle = 'rgba(255,255,255,0.1)';
+        oc.lineWidth = 2;
+        oc.beginPath();
+        roundRect(oc, posterX, posterY, posterW, posterH, 16);
+        oc.stroke();
+    } else {
+        oc.fillStyle = '#1a1a1a';
+        roundRect(oc, posterX, posterY, posterW, posterH, 16);
+        oc.fill();
+    }
+
+    // Calcula a altura total do conteúdo (alinhado ao TOPO do poster, não mais centralizado)
+    oc.font = '700 56px Oswald, sans-serif';
+    var titleLines = wrapText(oc, selectedContent.title.toUpperCase(), contentMaxW).slice(0, 3);
+    var titleBlockH = titleLines.length * 65;
+
+    var metaParts = [];
+    if (selectedContent.rating && selectedContent.rating !== 'N/A') metaParts.push({ text: '\u2605 ' + selectedContent.rating, color: '#eab308' });
+    if (selectedContent.year && selectedContent.year !== 'N/A') metaParts.push({ text: selectedContent.year, color: 'rgba(255,255,255,0.9)' });
+    if (selectedContent.genres && selectedContent.genres !== 'N/A') metaParts.push({ text: selectedContent.genres.split(',')[0].trim(), color: 'rgba(255,255,255,0.9)' });
+    if (selectedContent.runtime && selectedContent.runtime !== 'N/A') metaParts.push({ text: selectedContent.runtime, color: 'rgba(255,255,255,0.9)' });
+    var plat = getPlatformInputValue('videoPlatform') || selectedContent.autoProvider;
+    var metaBlockH = 28;
+
+    oc.font = '400 24px Manrope, sans-serif';
+    var synLines = wrapText(oc, selectedContent.overview || '', contentMaxW).slice(0, 6);
+    var synBlockH = synLines.length * 32;
+
+    var gap1 = 15, gap2 = 35;
+    var totalContentH = titleBlockH + gap1 + metaBlockH + gap2 + synBlockH;
+    var curY = posterY;
+
+    // Título
+    oc.textAlign = 'left';
+    oc.font = '700 56px Oswald, sans-serif';
+    oc.fillStyle = '#fff';
+    oc.shadowColor = 'rgba(0,0,0,0.8)';
+    oc.shadowBlur = 12;
+    curY += 56;
+    for (var ti2 = 0; ti2 < titleLines.length; ti2++) {
+        oc.fillText(titleLines[ti2], contentX, curY);
+        curY += 65;
+    }
+    oc.shadowBlur = 0;
+
+    // Meta
+    curY += gap1;
+    var sep = '  \u2022  ';
+    var metaFS = fitMetaFontSize(oc, metaParts, plat, sep, contentMaxW, 28, 14);
+    oc.font = '600 ' + metaFS + 'px Manrope, sans-serif';
+    var metaCursorX = contentX;
+    for (var mi = 0; mi < metaParts.length; mi++) {
+        if (mi > 0) {
+            oc.fillStyle = 'rgba(255,255,255,0.6)';
+            oc.fillText(sep, metaCursorX, curY);
+            metaCursorX += oc.measureText(sep).width;
+        }
+        oc.fillStyle = metaParts[mi].color;
+        oc.fillText(metaParts[mi].text, metaCursorX, curY);
+        metaCursorX += oc.measureText(metaParts[mi].text).width;
+    }
+    // Platform (with special colors for WPlay/RushPlay)
+    if (plat) {
+        oc.fillStyle = 'rgba(255,255,255,0.6)';
+        oc.fillText(sep, metaCursorX, curY);
+        metaCursorX += oc.measureText(sep).width;
+        var platW = drawPlatformText(oc, plat, metaCursorX, curY, metaFS);
+        metaCursorX += platW;
+    }
+
+    // Sinopse
+    curY += gap2;
+    oc.font = '400 24px Manrope, sans-serif';
+    oc.fillStyle = 'rgba(255,255,255,0.8)';
+    for (var sj2 = 0; sj2 < synLines.length; sj2++) {
+        oc.fillText(synLines[sj2], contentX, curY);
+        curY += 32;
+    }
+
+    // Botões Instagram + WhatsApp + CTA (3 boxes lado a lado, ícone esquerda / texto direita)
+    // Posicionados sempre ABAIXO tanto do texto (sinopse) quanto da capa do conteúdo,
+    // para nunca ficar por cima/atrás do poster quando o texto for curto.
+    var btnH = 70, btnGap = 20;
+    var btnW2 = Math.floor((W - pad * 2 - btnGap * 2) / 3);
+    var btnY = Math.max(curY + 20, posterY + posterH + 20);
+    var sIconSize = 32; var sIconPad = 16;
+    var sMaxBoxFont = Math.floor(btnH * 0.45); var sMinBoxFont = 14;
+    oc.textAlign = 'center';
+
+    var bl = layoutBoxes(pad, W - pad * 2, btnGap); btnW2 = bl.w;
+    if (bl.pos.instagram !== null) {
+    var igX = bl.pos.instagram;
+    // Botão Instagram (degradê laranja→rosa→roxo, ou personalizado)
+    applyBoxBg(oc, 'instagram', function() {
+        var instaGrad = oc.createLinearGradient(igX, btnY, igX + btnW2, btnY + btnH);
+        instaGrad.addColorStop(0, '#f09433'); instaGrad.addColorStop(0.3, '#e6683c'); instaGrad.addColorStop(0.6, '#dc2743'); instaGrad.addColorStop(0.8, '#cc2366'); instaGrad.addColorStop(1, '#bc1888');
+        oc.fillStyle = instaGrad;
+    });
+    roundRect(oc, igX, btnY, btnW2, btnH, 12);
+    oc.fill();
+    drawBoxIcon(oc, 'instagram', igX + sIconPad, btnY + btnH / 2 - sIconSize / 2, sIconSize, drawInstagramIcon);
+    var igMaxW = btnW2 - sIconPad - sIconSize - 18;
+    var igFS = fitBoxFontSize(oc, globalSettings.instagramHandle, igMaxW, sMaxBoxFont, sMinBoxFont, '700', 'Manrope, sans-serif');
+    oc.fillStyle = getBoxTextColor('instagram', '#fff');
+    oc.font = '700 ' + igFS + 'px Manrope, sans-serif';
+    oc.fillText(globalSettings.instagramHandle, igX + sIconPad + sIconSize + (btnW2 - sIconPad - sIconSize) / 2, btnY + btnH / 2 + Math.round(igFS * 0.32));
+
+    }
+    // Botão WhatsApp (centro, ou personalizado)
+    if (bl.pos.whatsapp !== null) {
+    var wppBtnX = bl.pos.whatsapp;
+    applyBoxBg(oc, 'whatsapp', function() { oc.fillStyle = '#25D366'; });
+    roundRect(oc, wppBtnX, btnY, btnW2, btnH, 12);
+    oc.fill();
+    drawBoxIcon(oc, 'whatsapp', wppBtnX + sIconPad, btnY + btnH / 2 - sIconSize / 2, sIconSize, drawWhatsAppIcon);
+    var wppMaxW = btnW2 - sIconPad - sIconSize - 18;
+    var wppFS = fitBoxFontSize(oc, globalSettings.whatsappText, wppMaxW, sMaxBoxFont, sMinBoxFont, '700', 'Manrope, sans-serif');
+    oc.fillStyle = getBoxTextColor('whatsapp', '#fff');
+    oc.font = '700 ' + wppFS + 'px Manrope, sans-serif';
+    oc.fillText(globalSettings.whatsappText, wppBtnX + sIconPad + sIconSize + (btnW2 - sIconPad - sIconSize) / 2, btnY + btnH / 2 + Math.round(wppFS * 0.32));
+
+    }
+    // Botão CTA (direita, ou personalizado — com ícone se enviado)
+    if (bl.pos.cta !== null) {
+    var btnX2 = bl.pos.cta;
+    applyBoxBg(oc, 'cta', function() { oc.fillStyle = '#ef4444'; });
+    roundRect(oc, btnX2, btnY, btnW2, btnH, 12);
+    oc.fill();
+    oc.fillStyle = getBoxTextColor('cta', '#fff');
+    if (customBoxIcons.cta) {
+        drawBoxIcon(oc, 'cta', btnX2 + sIconPad, btnY + btnH / 2 - sIconSize / 2, sIconSize, null);
+        var ctaMaxW = btnW2 - sIconPad - sIconSize - 18;
+        var ctaFS = fitBoxFontSize(oc, globalSettings.ctaText, ctaMaxW, sMaxBoxFont, sMinBoxFont, '800', 'Manrope, sans-serif');
+        oc.font = '800 ' + ctaFS + 'px Manrope, sans-serif';
+        oc.fillText(globalSettings.ctaText, btnX2 + sIconPad + sIconSize + (btnW2 - sIconPad - sIconSize) / 2, btnY + btnH / 2 + Math.round(ctaFS * 0.32));
+    } else {
+        var ctaMaxW2 = btnW2 - 24;
+        var ctaFS2 = fitBoxFontSize(oc, globalSettings.ctaText, ctaMaxW2, sMaxBoxFont, sMinBoxFont, '800', 'Manrope, sans-serif');
+        oc.font = '800 ' + ctaFS2 + 'px Manrope, sans-serif';
+        oc.fillText(globalSettings.ctaText, btnX2 + btnW2 / 2, btnY + btnH / 2 + Math.round(ctaFS2 * 0.32));
+    }
+
+    }
+    oc.textAlign = 'left';
+
+    return videoY; // Retorna a posição Y do vídeo para o drawFrame
+}
+
+// ============================================
+// GERA BANNER VIDEO - OTIMIZADO p/ WhatsApp
+// Canvas: 1080x1080 (1:1 square) ou 1080x1920 (9:16 story)
+// Vídeo no topo (16:9) + informações organizadas abaixo
+// compressão H.264 High Profile Level 4.0 + AAC
+// ============================================
+async function generateTrailerBannerVideo() {
+    if (!selectedContent || !uploadedVideoFile) { alert('Selecione um conte\u00FAdo e carregue um MP4'); return; }
+    var btn = document.getElementById('videoGenerateBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<div class="spinner mx-auto"></div>';
+    var progressBox = document.getElementById('videoProgressBox');
+    var progressLabel = document.getElementById('videoProgressLabel');
+    var progressFill = document.getElementById('videoProgressFill');
+    progressBox.classList.remove('hidden');
+    progressLabel.textContent = 'Preparando v\u00EDdeo...';
+    progressFill.style.width = '5%';
+
+    var quality = (document.getElementById('videoQuality') || {}).value || 'high';
+
+    // Detecta suporte a MP4 nativo
+    var nativeMp4Type = detectNativeMp4Support();
+    var nativeMp4 = !!nativeMp4Type;
+    var webmTypes = [
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm'
+    ];
+    var mimeType = nativeMp4Type;
+    if (!mimeType) {
+        for (var wi = 0; wi < webmTypes.length; wi++) {
+            if (window.MediaRecorder && MediaRecorder.isTypeSupported(webmTypes[wi])) { mimeType = webmTypes[wi]; break; }
+        }
+    }
+    if (!mimeType) {
+        btn.disabled = false;
+        btn.innerHTML = getVideoGenerateLabel();
+        progressBox.classList.add('hidden');
+        alert('Navegador n\u00E3o suporta MediaRecorder');
+        return;
+    }
+
+    // Bitrates otimizados para WhatsApp (com margem extra antes da recompressão do próprio WhatsApp)
+    // Formato 1080x1080 (1:1 square) com vídeo 1080x607 (16:9) no topo
+    var recVideoBitrate, recAudioBitrate;
+    if (quality === 'high')      { recVideoBitrate = nativeMp4 ? 10000000 : 12000000; recAudioBitrate = 192000; }
+    else if (quality === 'low')  { recVideoBitrate = nativeMp4 ? 2500000 : 5000000;  recAudioBitrate = 96000;  }
+    else                         { recVideoBitrate = nativeMp4 ? 6000000 : 8000000;  recAudioBitrate = 128000; }
+
+    var srcVideo = null;
+    var recorder = null;
+    var failsafeTimer = null;
+    var stopRequested = false;
+    var audioCtxRef = null;
+    var drawIntervalId = null;
+
+    function cleanupVideoEl() {
+        try { if (drawIntervalId) clearInterval(drawIntervalId); } catch(e) {}
+        try { if (srcVideo && srcVideo.parentNode) srcVideo.parentNode.removeChild(srcVideo); } catch(e) {}
+        try { if (audioCtxRef && audioCtxRef.state !== 'closed') audioCtxRef.close(); } catch(e) {}
+    }
+
+    try {
+        // Define dimensões baseado no formato
+        var vsize = getVideoSizeInfo(videoFormat);
+        var W = vsize.W;
+        var H = vsize.H;
+        var videoAreaH = Math.round(W * 0.61); // Vídeo 16:9 ampliado (~659px)
+        var formatLabel = vsize.label;
+
+        // Canvas final (o que vai pro MediaRecorder)
+        var outCanvas = document.createElement('canvas');
+        outCanvas.width = W; outCanvas.height = H;
+        var oc = outCanvas.getContext('2d', { alpha: false });
+        oc.imageSmoothingEnabled = true;
+        oc.imageSmoothingQuality = 'high';
+
+        // Canvas offscreen com a camada ESTÁTICA (cache) - só desenhada 1 vez
+        var staticCanvas = document.createElement('canvas');
+        staticCanvas.width = W; staticCanvas.height = H;
+        var sc = staticCanvas.getContext('2d', { alpha: false });
+        sc.imageSmoothingEnabled = true;
+        sc.imageSmoothingQuality = 'high';
+
+        videoContainer.innerHTML = '<div class="text-center"><p class="text-purple-300 mb-3 font-semibold">Gerando banner vídeo ' + formatLabel
+            + (nativeMp4 ? ' (modo rápido MP4 nativo)' : ' (modo compatível)') + '...</p></div>';
+        videoContainer.appendChild(outCanvas);
+        outCanvas.style.maxWidth = vsize.previewMax;
+        outCanvas.style.borderRadius = '12px';
+        outCanvas.style.boxShadow = '0 0 60px rgba(168,85,247,0.4)';
+
+        srcVideo = document.createElement('video');
+        srcVideo.src = uploadedVideoUrl;
+        srcVideo.preload = 'auto';
+        srcVideo.playsInline = true;
+        srcVideo.muted = false;
+        srcVideo.style.cssText = 'position:fixed;left:-99999px;top:-99999px;width:1px;height:1px;opacity:0;pointer-events:none;';
+        document.body.appendChild(srcVideo);
+
+        await new Promise(function(res, rej) {
+            var done = false;
+            var to = setTimeout(function() { if (!done) { done = true; rej(new Error('Timeout ao carregar MP4 (15s)')); } }, 15000);
+            function ok() { if (done) return; done = true; clearTimeout(to); res(); }
+            function fail() { if (done) return; done = true; clearTimeout(to); rej(new Error('Erro ao carregar MP4')); }
+            srcVideo.addEventListener('canplay', ok, { once: true });
+            srcVideo.addEventListener('loadeddata', ok, { once: true });
+            srcVideo.addEventListener('error', fail, { once: true });
+            if (srcVideo.readyState >= 3) ok();
+        });
+
+        // Renderiza a camada estática UMA VEZ no offscreen
+        var videoY = 0; // Posição Y do vídeo (necessário para Story)
+        if (videoFormat === 'story' || videoFormat === 'status') {
+            videoY = renderStaticStoryLayer(sc, W, H, videoAreaH);
+        } else {
+            renderStaticBannerLayer(sc, W, H, videoAreaH);
+        }
+        // Copia já pro canvas final (preview inicial)
+        oc.drawImage(staticCanvas, 0, 0);
+
+        progressLabel.textContent = 'Iniciando reprodu\u00E7\u00E3o...';
+        progressFill.style.width = '10%';
+
+        var audioStream = null;
+        var audioCtx = null;
+        try {
+            var AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (AudioCtx) {
+                audioCtx = new AudioCtx();
+                audioCtxRef = audioCtx;
+                if (audioCtx.state === 'suspended') { try { await audioCtx.resume(); } catch(e) {} }
+                var sourceNode = audioCtx.createMediaElementSource(srcVideo);
+                var destNode = audioCtx.createMediaStreamDestination();
+                sourceNode.connect(destNode);
+                var muteGain = audioCtx.createGain();
+                muteGain.gain.value = 0;
+                sourceNode.connect(muteGain);
+                muteGain.connect(audioCtx.destination);
+                audioStream = destNode.stream;
+            }
+        } catch(e) { console.warn('Web Audio API falhou:', e); }
+
+        try { srcVideo.currentTime = 0; } catch(e) {}
+        try { await srcVideo.play(); }
+        catch(e) { throw new Error('N\u00E3o foi poss\u00EDvel reproduzir o v\u00EDdeo. Tente outro arquivo.'); }
+
+        progressLabel.textContent = 'Configurando grava\u00E7\u00E3o...';
+        progressFill.style.width = '15%';
+
+        if (!audioStream) {
+            try {
+                if (typeof srcVideo.captureStream === 'function') audioStream = srcVideo.captureStream();
+                else if (typeof srcVideo.mozCaptureStream === 'function') audioStream = srcVideo.mozCaptureStream();
+            } catch(e) {}
+        }
+
+        var canvasStream = outCanvas.captureStream(30);
+        var combinedTracks = [].concat(canvasStream.getVideoTracks());
+        if (audioStream) audioStream.getAudioTracks().forEach(function(t) { combinedTracks.push(t); });
+        var combinedStream = new MediaStream(combinedTracks);
+
+        recorder = new MediaRecorder(combinedStream, {
+            mimeType: mimeType,
+            videoBitsPerSecond: recVideoBitrate,
+            audioBitsPerSecond: recAudioBitrate
+        });
+        var chunks = [];
+        recorder.ondataavailable = function(ev) { if (ev.data && ev.data.size > 0) chunks.push(ev.data); };
+        recorder.onerror = function(e) { console.error('MediaRecorder error:', e); };
+
+        var rawBlobPromise = new Promise(function(resolve, reject) {
+            recorder.onstop = function() {
+                try {
+                    if (chunks.length === 0) { reject(new Error('Nenhum dado gravado.')); return; }
+                    var ext = mimeType.indexOf('mp4') !== -1 ? 'mp4' : 'webm';
+                    var blob = new Blob(chunks, { type: mimeType.split(';')[0] });
+                    resolve({ blob: blob, ext: ext });
+                } catch(err) { reject(err); }
+            };
+        });
+
+        // ===================================================
+        // drawFrame OTIMIZADO:
+        // 1. Copia a camada estática (1 drawImage) - rápido
+        // 2. Desenha o vídeo na área apropriada (videoY + videoAreaH)
+        // 30fps FIXOS (setInterval 33ms)
+        // ===================================================
+        function drawFrame() {
+            // Copia toda a camada estática (poster, texto, botões, logo)
+            oc.drawImage(staticCanvas, 0, 0);
+
+            // Desenha o frame atual do vídeo na área apropriada
+            if (!srcVideo.paused && !srcVideo.ended && srcVideo.readyState >= 2) {
+                var vR = srcVideo.videoWidth / srcVideo.videoHeight;
+                var aR = W / videoAreaH;
+                var dw, dh, ox, oy;
+                if (vR > aR) {
+                    // Vídeo mais largo que a área - cobre a altura toda e corta as laterais
+                    dh = videoAreaH;
+                    dw = videoAreaH * vR;
+                    ox = (W - dw) / 2;
+                    oy = 0;
+                } else {
+                    // Vídeo mais alto/estreito que a área - cobre a largura toda e corta em cima/embaixo
+                    dw = W;
+                    dh = W / vR;
+                    ox = 0;
+                    oy = (videoAreaH - dh) / 2;
+                }
+                try { 
+                    // Salva o estado do canvas
+                    oc.save();
+                    // Clipping para garantir que o vídeo não ultrapasse a área
+                    oc.beginPath();
+                    oc.rect(0, videoY, W, videoAreaH);
+                    oc.clip();
+                    // Desenha o vídeo na posição Y correta
+                    oc.drawImage(srcVideo, ox, videoY + oy, dw, dh);
+                    // Restaura o estado
+                    oc.restore();
+                } catch(e) {
+                    oc.restore();
+                }
+            }
+
+            // Redesenha a marca d'água POR CIMA do vídeo (o vídeo em reprodução cobre o que
+            // foi desenhado na camada estática dentro da área do vídeo) — Post e Story
+            if (uploadedLogo) {
+                var logoR2 = uploadedLogo.width / uploadedLogo.height;
+                var logoH2 = 140;
+                var logoW2 = logoH2 * logoR2;
+                if (logoW2 > 320) { logoW2 = 320; logoH2 = logoW2 / logoR2; }
+                redrawWatermarkOverVideo(oc, 0, videoY, W, videoAreaH, W - logoW2 - 25, videoY + 10, logoW2, logoH2);
+            }
+
+            // Progresso
+            if (srcVideo.duration > 0) {
+                var topPct = nativeMp4 ? 95 : 50;
+                var basePct = 15;
+                var pct = Math.min(topPct, basePct + (srcVideo.currentTime / srcVideo.duration) * (topPct - basePct));
+                progressFill.style.width = pct + '%';
+                progressLabel.textContent = 'Gravando: ' + Math.floor(srcVideo.currentTime) + 's / ' + Math.floor(srcVideo.duration) + 's';
+            }
+        }
+
+        function stopRecording(reason) {
+            if (stopRequested) return;
+            stopRequested = true;
+            try { if (drawIntervalId) { clearInterval(drawIntervalId); drawIntervalId = null; } } catch(e) {}
+            try { srcVideo.pause(); } catch(e) {}
+            setTimeout(function() {
+                try {
+                    if (recorder && recorder.state !== 'inactive') {
+                        recorder.requestData();
+                        setTimeout(function() { try { if (recorder.state !== 'inactive') recorder.stop(); } catch(e) {} }, 100);
+                    }
+                } catch(e) {}
+            }, 250);
+        }
+
+        srcVideo.addEventListener('ended', function() { stopRecording('ended'); });
+        srcVideo.addEventListener('pause', function() {
+            if (srcVideo.duration > 0 && srcVideo.currentTime >= srcVideo.duration - 0.2) stopRecording('pause-near-end');
+        });
+        srcVideo.addEventListener('timeupdate', function() {
+            if (srcVideo.duration > 0 && srcVideo.currentTime >= srcVideo.duration - 0.05) stopRecording('timeupdate-end');
+        });
+
+        var maxMs = ((srcVideo.duration || 60) + 3) * 1000;
+        failsafeTimer = setTimeout(function() { stopRecording('failsafe-timeout'); }, maxMs);
+
+        progressLabel.textContent = 'Gravando...';
+        progressFill.style.width = '20%';
+        recorder.start(500);
+
+        // Loop de desenho TRAVADO em 30fps
+        drawIntervalId = setInterval(drawFrame, 1000 / 30);
+
+        var rawResult = await rawBlobPromise;
+        clearTimeout(failsafeTimer);
+        cleanupVideoEl();
+
+        // ============================================
+        // FINALIZAÇÃO - Conversão FFmpeg se necessário
+        // ============================================
+        var finalBlob = rawResult.blob;
+        var finalExt = rawResult.ext;
+        var rawSizeMB = (rawResult.blob.size / 1024 / 1024).toFixed(2);
+        var compressed = false;
+        var nativeOut = false;
+
+        if (nativeMp4 && rawResult.ext === 'mp4') {
+            nativeOut = true;
+            progressFill.style.width = '100%';
+            progressLabel.textContent = 'Finalizando...';
+        } else if (ffmpegSupported()) {
+            try {
+                progressLabel.textContent = 'Carregando compressor FFmpeg...';
+                progressFill.style.width = '55%';
+                var ffmpeg = await loadFFmpegOnce(function(ratio) {
+                    var pct = 60 + Math.max(0, Math.min(1, ratio)) * 35;
+                    progressFill.style.width = pct + '%';
+                    progressLabel.textContent = 'Convertendo WebM \u2192 MP4... ' + Math.round(ratio * 100) + '%';
+                });
+
+                progressLabel.textContent = 'Convertendo WebM \u2192 MP4...';
+                progressFill.style.width = '60%';
+
+                var inputName = 'input.' + rawResult.ext;
+                var outputName = 'output.mp4';
+                var fetchFile = window.FFmpeg.fetchFile;
+                ffmpeg.FS('writeFile', inputName, await fetchFile(rawResult.blob));
+
+                // Configurações de compressão otimizados para WhatsApp
+                // H.264 High Profile Level 4.0 + AAC + faststart
+                // Resolução 1080x1080 (1:1 square)
+                var crf, maxrate, bufsize, audioBr;
+                if (quality === 'high')      { crf = '18'; maxrate = '10000k'; bufsize = '20000k'; audioBr = '192k'; }
+                else if (quality === 'low')  { crf = '24'; maxrate = '3000k';  bufsize = '6000k';  audioBr = '96k';  }
+                else                         { crf = '20'; maxrate = '6000k';  bufsize = '12000k'; audioBr = '128k'; }
+
+                // veryfast (em vez de ultrafast) = qualidade bem melhor por bit,
+                // ainda rápido o bastante no core com threads do ffmpeg.wasm
+                // -vf scale=1080:1080 garante resolução quadrada para WhatsApp
+                await ffmpeg.run(
+                    '-i', inputName,
+                    '-c:v', 'libx264',
+                    '-preset', 'veryfast',
+                    '-tune', 'fastdecode',
+                    '-profile:v', 'high',
+                    '-level', '4.0',
+                    '-pix_fmt', 'yuv420p',
+                    '-crf', crf,
+                    '-maxrate', maxrate,
+                    '-bufsize', bufsize,
+                    '-vf', 'scale=' + W + ':' + H + ':flags=lanczos',
+                    '-r', '30',
+                    '-c:a', 'aac',
+                    '-b:a', audioBr,
+                    '-ar', '44100',
+                    '-ac', '2',
+                    '-movflags', '+faststart',
+                    '-threads', '0',
+                    '-y', outputName
+                );
+
+                var data = ffmpeg.FS('readFile', outputName);
+                finalBlob = new Blob([data.buffer], { type: 'video/mp4' });
+                finalExt = 'mp4';
+                compressed = true;
+                try { ffmpeg.FS('unlink', inputName); ffmpeg.FS('unlink', outputName); } catch(e) {}
+            } catch (compErr) {
+                console.error('Erro na compacta\u00E7\u00E3o FFmpeg, mantendo v\u00EDdeo original:', compErr);
+            }
+        }
+
+        progressFill.style.width = '100%';
+        progressLabel.textContent = 'Conclu\u00EDdo!';
+
+        var finalSizeMB = (finalBlob.size / 1024 / 1024).toFixed(2);
+        var finalSizeBytes = finalBlob.size;
+        var savedPct = compressed ? Math.round((1 - finalBlob.size / rawResult.blob.size) * 100) : 0;
+        var url = URL.createObjectURL(finalBlob);
+        var safeTitle = (selectedContent.title || 'trailer').replace(/[^a-zA-Z0-9]/g, '_');
+        var formatSuffix = vsize.suffix;
+        var fileName = safeTitle + '_trailer' + formatSuffix + '_whatsapp_hd.' + finalExt;
+        var exceedsLimit = finalSizeBytes > (100 * 1024 * 1024); // 100MB
+
+        // Limpa o container e mostra o resultado final
+        videoContainer.innerHTML = '';
+        
+        // Container principal com layout limpo
+        var resultContainer = document.createElement('div');
+        resultContainer.className = 'w-full max-w-2xl mx-auto';
+        
+        // Título de sucesso
+        var titleDiv = document.createElement('div');
+        titleDiv.className = 'text-center mb-6';
+        titleDiv.innerHTML = '<h3 class="font-oswald text-3xl font-bold text-purple-400 mb-2">Banner Gerado com Sucesso!</h3>' +
+            '<p class="text-zinc-400 text-sm">' + vsize.title + '</p>';
+        resultContainer.appendChild(titleDiv);
+        
+        // Preview do vídeo
+        var vidEl = document.createElement('video');
+        vidEl.src = url;
+        vidEl.controls = true;
+        vidEl.autoplay = true;
+        vidEl.loop = true;
+        vidEl.muted = true;
+        vidEl.style.cssText = 'width: 100%; max-width: ' + vsize.resultMax + '; border-radius: 12px; box-shadow: 0 0 60px rgba(168,85,247,0.5); margin: 0 auto; display: block;';
+        resultContainer.appendChild(vidEl);
+        
+        // Informações técnicas
+        var infoDiv = document.createElement('div');
+        infoDiv.className = 'mt-6 p-4 bg-zinc-900/50 border border-zinc-800 rounded-lg';
+        var statusHtml2 = '';
+        var resLabel = W + 'x' + H;
+        if (nativeOut) {
+            statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
+                '<span class="text-green-400 text-sm font-semibold">\u26A1 MP4 nativo (H.264 + AAC) — sem recompressão</span></div>' +
+                '<div class="text-center text-zinc-300 text-xs">' +
+                '<span class="font-bold">' + finalSizeMB + ' MB</span> · Qualidade: ' + quality.toUpperCase() + ' · ' + resLabel + '</div>';
+        } else if (compressed) {
+            statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
+                '<span class="text-green-400 text-sm font-semibold">\u2728 Convertido para MP4 (H.264 High Profile + AAC)</span></div>' +
+                '<div class="text-center text-zinc-300 text-xs">' +
+                'Original: ' + rawSizeMB + ' MB → Final: <span class="font-bold text-green-400">' + finalSizeMB + ' MB</span> ' +
+                '<span class="text-green-400">(-' + savedPct + '%)</span> · ' + resLabel + '</div>';
+        } else {
+            statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
+                '<span class="text-yellow-400 text-xs">\u26A0 Sem conversão disponível - vídeo original</span></div>' +
+                '<div class="text-center text-zinc-400 text-xs">' +
+                'Tamanho: ' + finalSizeMB + ' MB · Formato: ' + finalExt.toUpperCase() + ' · ' + resLabel + '</div>';
+        }
+        infoDiv.innerHTML = statusHtml2;
+        resultContainer.appendChild(infoDiv);
+        
+        // Aviso se ultrapassar 100MB (limite WhatsApp HD)
+        if (exceedsLimit) {
+            var warnDiv = document.createElement('div');
+            warnDiv.className = 'mt-4 p-4 bg-yellow-900/30 border border-yellow-500/50 rounded-lg';
+            warnDiv.innerHTML = '<div class="flex items-start gap-3">' +
+                '<span class="text-yellow-400 text-xl flex-shrink-0">\u26A0\uFE0F</span>' +
+                '<div>' +
+                '<p class="text-yellow-300 font-semibold text-sm mb-1">Arquivo acima de 100MB</p>' +
+                '<p class="text-yellow-200/80 text-xs leading-relaxed">O WhatsApp pode não reconhecer o vídeo em HD. O limite para envio no formato HD é de até 100MB (ou até 180MB dependendo da sua região, versão do app e velocidade da conexão). Considere usar qualidade <b>Média</b> ou <b>Baixa</b> para reduzir o tamanho.</p>' +
+                '</div></div>';
+            resultContainer.appendChild(warnDiv);
+        }
+        
+        // Botão de download grande e profissional
+        var dlBtn = document.createElement('a');
+        dlBtn.href = url;
+        dlBtn.download = fileName;
+        dlBtn.className = 'block w-full mt-6 bg-gradient-to-r from-purple-600 to-purple-500 hover:from-purple-500 hover:to-purple-400 text-white font-bold uppercase tracking-wider py-5 px-8 rounded-xl cursor-pointer transition-all shadow-lg hover:shadow-purple-500/50 text-center';
+        dlBtn.innerHTML = '<span class="flex items-center justify-center gap-3">' +
+            '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">' +
+            '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>' +
+            '</svg>' +
+            '<span>BAIXAR VÍDEO HD</span></span>';
+        dlBtn.setAttribute('data-testid', 'download-trailer-btn');
+        resultContainer.appendChild(dlBtn);
+        
+        // Nome do arquivo
+        var fileNameDiv = document.createElement('div');
+        fileNameDiv.className = 'text-center mt-3 text-zinc-500 text-xs';
+        fileNameDiv.textContent = fileName;
+        resultContainer.appendChild(fileNameDiv);
+        
+        videoContainer.appendChild(resultContainer);
+
+        setTimeout(function() { progressBox.classList.add('hidden'); }, 1500);
+
+        btn.disabled = false;
+        btn.innerHTML = getVideoGenerateLabel();
+    } catch (error) {
+        console.error('Erro:', error);
+        clearTimeout(failsafeTimer);
+        cleanupVideoEl();
+        try { if (recorder && recorder.state !== 'inactive') recorder.stop(); } catch(e) {}
+        alert('Erro ao gerar banner: ' + error.message);
+        btn.disabled = false;
+        btn.innerHTML = getVideoGenerateLabel();
+        progressBox.classList.add('hidden');
+    }
+}
+// ============================================
+// MODO 3: VÍDEO COM TEXTO LIVRE (sem dados de filme)
+// Mesmo padrão visual do gerador de Trailer em Vídeo
+// (vídeo no topo + logo + boxes Instagram/WhatsApp/CTA),
+// porém a área inferior mostra um TEXTO PERSONALIZADO
+// que se auto-ajusta (tamanho de fonte) conforme o
+// tamanho do texto digitado, em vez de dados do filme.
+// ============================================
+
+// Ajusta automaticamente o tamanho da fonte de um bloco de texto
+// para que ele caiba dentro de maxWidth x maxHeight, quebrando linhas.
+function fitAutoText(oc, text, maxWidth, maxHeight, opts) {
+    opts = opts || {};
+    var maxFont = opts.maxFont || 64;
+    var minFont = opts.minFont || 22;
+    var weight = opts.weight || '700';
+    var family = opts.family || 'Oswald, sans-serif';
+    var lineHeightRatio = opts.lineHeightRatio || 1.22;
+    var maxLines = opts.maxLines || 8;
+    var clean = (text || '').trim();
+    if (!clean) clean = 'SEU TEXTO AQUI';
+
+    var fontSize = maxFont;
+    var lines = [];
+    var lineHeight = 0;
+    while (fontSize >= minFont) {
+        oc.font = weight + ' ' + fontSize + 'px ' + family;
+        lines = wrapText(oc, clean, maxWidth);
+        lineHeight = Math.round(fontSize * lineHeightRatio);
+        if (lines.length <= maxLines && (lines.length * lineHeight) <= maxHeight) break;
+        fontSize -= 2;
+    }
+    // Se mesmo na fonte mínima não coube, corta linhas excedentes com reticências
+    if ((lines.length * lineHeight) > maxHeight) {
+        var maxAllowedLines = Math.max(1, Math.floor(maxHeight / lineHeight));
+        if (lines.length > maxAllowedLines) {
+            lines = lines.slice(0, maxAllowedLines);
+            var lastIdx = lines.length - 1;
+            var lastLine = lines[lastIdx];
+            oc.font = weight + ' ' + fontSize + 'px ' + family;
+            while (lastLine.length > 0 && oc.measureText(lastLine + '…').width > maxWidth) {
+                lastLine = lastLine.slice(0, -1);
+            }
+            lines[lastIdx] = lastLine + '…';
+        }
+    }
+    return { fontSize: fontSize, lines: lines, lineHeight: lineHeight };
+}
+
+// Desenha as 3 boxes (Instagram / WhatsApp / CTA) numa faixa horizontal completa
+function drawCustomBottomButtons(oc, x, y, totalW, btnH, btnGap, iconSize, iconPad, fontSizeHandle, fontSizeCta) {
+    var bl = layoutBoxes(x, totalW, btnGap);
+    var btnW = bl.w;
+    var minBoxFont = Math.max(12, Math.round(fontSizeHandle * 0.55));
+    oc.textAlign = 'center';
+
+    if (bl.pos.instagram !== null) {
+    var igX = bl.pos.instagram;
+    // Instagram (degradê, ou personalizado)
+    applyBoxBg(oc, 'instagram', function() {
+        var instaGrad = oc.createLinearGradient(igX, y, igX + btnW, y + btnH);
+        instaGrad.addColorStop(0, '#f09433'); instaGrad.addColorStop(0.3, '#e6683c'); instaGrad.addColorStop(0.6, '#dc2743'); instaGrad.addColorStop(0.8, '#cc2366'); instaGrad.addColorStop(1, '#bc1888');
+        oc.fillStyle = instaGrad;
+    });
+    roundRect(oc, igX, y, btnW, btnH, 10);
+    oc.fill();
+    drawBoxIcon(oc, 'instagram', igX + iconPad, y + btnH / 2 - iconSize / 2, iconSize, drawInstagramIcon);
+    var igMaxW = btnW - iconPad - iconSize - 14;
+    var igFS = fitBoxFontSize(oc, globalSettings.instagramHandle, igMaxW, fontSizeHandle, minBoxFont, '700', 'Manrope, sans-serif');
+    oc.fillStyle = getBoxTextColor('instagram', '#fff');
+    oc.font = '700 ' + igFS + 'px Manrope, sans-serif';
+    oc.fillText(globalSettings.instagramHandle, igX + iconPad + iconSize + (btnW - iconPad - iconSize) / 2, y + btnH / 2 + Math.round(igFS * 0.32));
+
+    }
+    // WhatsApp (ou personalizado)
+    if (bl.pos.whatsapp !== null) {
+    var wppX = bl.pos.whatsapp;
+    applyBoxBg(oc, 'whatsapp', function() { oc.fillStyle = '#25D366'; });
+    roundRect(oc, wppX, y, btnW, btnH, 10);
+    oc.fill();
+    drawBoxIcon(oc, 'whatsapp', wppX + iconPad, y + btnH / 2 - iconSize / 2, iconSize, drawWhatsAppIcon);
+    var wppMaxW = btnW - iconPad - iconSize - 14;
+    var wppFS = fitBoxFontSize(oc, globalSettings.whatsappText, wppMaxW, fontSizeHandle, minBoxFont, '700', 'Manrope, sans-serif');
+    oc.fillStyle = getBoxTextColor('whatsapp', '#fff');
+    oc.font = '700 ' + wppFS + 'px Manrope, sans-serif';
+    oc.fillText(globalSettings.whatsappText, wppX + iconPad + iconSize + (btnW - iconPad - iconSize) / 2, y + btnH / 2 + Math.round(wppFS * 0.32));
+
+    }
+    // CTA (ou personalizado — com ícone se enviado)
+    if (bl.pos.cta !== null) {
+    var ctaX = bl.pos.cta;
+    applyBoxBg(oc, 'cta', function() { oc.fillStyle = '#ef4444'; });
+    roundRect(oc, ctaX, y, btnW, btnH, 10);
+    oc.fill();
+    oc.fillStyle = getBoxTextColor('cta', '#fff');
+    var minBoxFontCta = Math.max(12, Math.round(fontSizeCta * 0.55));
+    if (customBoxIcons.cta) {
+        drawBoxIcon(oc, 'cta', ctaX + iconPad, y + btnH / 2 - iconSize / 2, iconSize, null);
+        var ctaMaxW = btnW - iconPad - iconSize - 14;
+        var ctaFS = fitBoxFontSize(oc, globalSettings.ctaText, ctaMaxW, fontSizeCta, minBoxFontCta, '800', 'Manrope, sans-serif');
+        oc.font = '800 ' + ctaFS + 'px Manrope, sans-serif';
+        oc.fillText(globalSettings.ctaText, ctaX + iconPad + iconSize + (btnW - iconPad - iconSize) / 2, y + btnH / 2 + Math.round(ctaFS * 0.32));
+    } else {
+        var ctaMaxW2 = btnW - 20;
+        var ctaFS2 = fitBoxFontSize(oc, globalSettings.ctaText, ctaMaxW2, fontSizeCta, minBoxFontCta, '800', 'Manrope, sans-serif');
+        oc.font = '800 ' + ctaFS2 + 'px Manrope, sans-serif';
+        oc.fillText(globalSettings.ctaText, ctaX + btnW / 2, y + btnH / 2 + Math.round(ctaFS2 * 0.32));
+    }
+
+    }
+    oc.textAlign = 'left';
+}
+
+// Layout POST (1080x1080) — vídeo no topo, texto livre centralizado embaixo
+function renderCustomStaticBannerLayer(oc, W, H, videoAreaH, customText) {
+    oc.fillStyle = '#000';
+    oc.fillRect(0, 0, W, H);
+    oc.fillRect(0, 0, W, videoAreaH);
+
+    var infoAreaY = videoAreaH;
+    var infoAreaH = H - videoAreaH;
+    var bgGrad = oc.createLinearGradient(0, infoAreaY, 0, H);
+    bgGrad.addColorStop(0, '#0a0a0a');
+    bgGrad.addColorStop(1, '#050505');
+    oc.fillStyle = bgGrad;
+    oc.fillRect(0, infoAreaY, W, infoAreaH);
+
+    // Marca d'água (logo) — modo unificado (none/corner/full), canto superior direito do vídeo
+    if (uploadedLogo) {
+        var logoR = uploadedLogo.width / uploadedLogo.height;
+        var logoH = 140;
+        var logoW = logoH * logoR;
+        if (logoW > 320) { logoW = 320; logoH = logoW / logoR; }
+        applyWatermark(oc, 0, 0, W, H, W - logoW - 25, 10, logoW, logoH);
+    }
+
+    var pad = 50;
+    var btnH = 55, btnGap = 12;
+    var btnY = H - btnH - 30;
+    var textMaxW = W - pad * 2;
+    var textAreaTop = infoAreaY + pad;
+    var textAreaH = Math.max(40, (btnY - 25) - textAreaTop);
+
+    var fit = fitAutoText(oc, (customText || '').toUpperCase(), textMaxW, textAreaH, { maxFont: 64, minFont: 24, weight: '700', family: 'Oswald, sans-serif', lineHeightRatio: 1.22, maxLines: 6 });
+    var totalTextH = fit.lines.length * fit.lineHeight;
+    var startY = textAreaTop + Math.max(0, (textAreaH - totalTextH) / 2) + fit.fontSize * 0.85;
+
+    oc.textAlign = 'center';
+    oc.fillStyle = '#fff';
+    oc.shadowColor = 'rgba(0,0,0,0.8)';
+    oc.shadowBlur = 10;
+    oc.font = '700 ' + fit.fontSize + 'px Oswald, sans-serif';
+    var cy = startY;
+    for (var i = 0; i < fit.lines.length; i++) { oc.fillText(fit.lines[i], W / 2, cy); cy += fit.lineHeight; }
+    oc.shadowBlur = 0;
+    oc.textAlign = 'left';
+
+    drawCustomBottomButtons(oc, pad, btnY, W - pad * 2, btnH, btnGap, 24, 12, 16, 18);
+}
+
+// Layout STORY (1080x1920) — logo no topo + vídeo centralizado + texto livre embaixo
+function renderCustomStaticStoryLayer(oc, W, H, videoAreaH, customText) {
+    oc.fillStyle = '#000';
+    oc.fillRect(0, 0, W, H);
+
+    var videoCenterY = Math.round(H * 0.44);
+    var videoY = videoCenterY - Math.floor(videoAreaH / 2);
+
+    var infoAreaY = videoY + videoAreaH;
+    var infoAreaH = H - infoAreaY;
+
+    // IMPORTANTE: preencher a área do vídeo ANTES da marca d'água, senão o
+    // preenchimento preto apaga o padrão da marca d'água ali dentro (modo "full").
+    oc.fillStyle = '#000';
+    oc.fillRect(0, videoY, W, videoAreaH);
+
+    // Marca d'água (logo) — modo unificado (none/corner/full), canto superior direito do vídeo
+    if (uploadedLogo) {
+        var logoR = uploadedLogo.width / uploadedLogo.height;
+        var logoH = 140;
+        var logoW = logoH * logoR;
+        if (logoW > 320) { logoW = 320; logoH = logoW / logoR; }
+        applyWatermark(oc, 0, 0, W, H, W - logoW - 25, videoY + 10, logoW, logoH);
+    }
+
+    var bgGrad = oc.createLinearGradient(0, infoAreaY, 0, H);
+    bgGrad.addColorStop(0, '#0a0a0a');
+    bgGrad.addColorStop(1, '#050505');
+    oc.fillStyle = bgGrad;
+    oc.fillRect(0, infoAreaY, W, infoAreaH);
+
+    var pad = 60;
+    var btnH = 70, btnGap = 20;
+    var btnY = H - btnH - 40;
+    var textMaxW = W - pad * 2;
+    var textAreaTop = infoAreaY + 30;
+    var textAreaH = Math.max(40, (btnY - 30) - textAreaTop);
+
+    var fit = fitAutoText(oc, (customText || '').toUpperCase(), textMaxW, textAreaH, { maxFont: 76, minFont: 28, weight: '700', family: 'Oswald, sans-serif', lineHeightRatio: 1.22, maxLines: 7 });
+    var totalTextH = fit.lines.length * fit.lineHeight;
+    var startY = textAreaTop + Math.max(0, (textAreaH - totalTextH) / 2) + fit.fontSize * 0.85;
+
+    oc.textAlign = 'center';
+    oc.fillStyle = '#fff';
+    oc.shadowColor = 'rgba(0,0,0,0.8)';
+    oc.shadowBlur = 12;
+    oc.font = '700 ' + fit.fontSize + 'px Oswald, sans-serif';
+    var cy = startY;
+    for (var i = 0; i < fit.lines.length; i++) { oc.fillText(fit.lines[i], W / 2, cy); cy += fit.lineHeight; }
+    oc.shadowBlur = 0;
+    oc.textAlign = 'left';
+
+    drawCustomBottomButtons(oc, pad, btnY, W - pad * 2, btnH, btnGap, 32, 16, 20, 22);
+
+    return videoY;
+}
+
+// ============================================
+// CONTROLE DA UI — MODO VÍDEO COM TEXTO LIVRE
+// ============================================
+async function loadCustomVideoMode() {
+    uploadedVideoFile = null;
+    if (uploadedVideoUrl) { try { URL.revokeObjectURL(uploadedVideoUrl); } catch(e) {} }
+    uploadedVideoUrl = null;
+    videoFormat = 'post';
+
+    var nativeMp4Type = detectNativeMp4Support();
+    var statusHtml;
+    if (nativeMp4Type) {
+        statusHtml = '<span class="text-green-400">\u26A1 MP4 nativo ativado (modo r\u00E1pido)</span>';
+    } else if (ffmpegSupported()) {
+        statusHtml = '<span class="text-green-400">\u2713 Convers\u00E3o WebM\u2192MP4 ativada</span>';
+    } else {
+        statusHtml = '<span class="text-yellow-400">\u26A0 Sem convers\u00E3o - v\u00EDdeo sair\u00E1 em WebM</span>';
+    }
+
+    controlPanel.innerHTML =
+        '<header class="border-b border-zinc-800 pb-5"><h2 class="font-oswald text-2xl font-bold text-blue-400">V\u00EDdeo com Texto Livre</h2><p class="text-zinc-500 text-sm mt-2">Carregue um v\u00EDdeo MP4 e escreva um texto personalizado — sem dados de filme</p><p class="text-xs mt-2">' + statusHtml + '</p></header>' +
+        '<div class="border-2 border-dashed border-blue-500/40 rounded-lg p-5 bg-blue-900/10">' +
+            '<label class="text-xs uppercase tracking-widest text-blue-300 font-semibold block mb-3">V\u00EDdeo MP4 (do dispositivo)</label>' +
+            '<label class="cursor-pointer flex flex-col items-center gap-2 hover:bg-blue-900/20 transition-colors p-4 rounded">' +
+                '<svg class="w-10 h-10 text-blue-400" fill="currentColor" viewBox="0 0 256 256"><path d="M232,72H160V40a16,16,0,0,0-16-16H40A16,16,0,0,0,24,40V184a16,16,0,0,0,16,16H88v32a16,16,0,0,0,16,16H232a16,16,0,0,0,16-16V88A16,16,0,0,0,232,72ZM40,40H144V72H88a16,16,0,0,0-16,16v96H40Zm192,200H104V88H232V240Z"/></svg>' +
+                '<span id="cvFileName" class="text-sm text-blue-200 font-semibold">Clique para escolher MP4</span>' +
+                '<input type="file" id="cvFileInput" accept="video/mp4,video/*" class="hidden" data-testid="cv-file-input">' +
+            '</label>' +
+            '<video id="cvPreview" class="w-full mt-3 rounded hidden" controls></video>' +
+        '</div>' +
+        '<section class="flex flex-col gap-2 mt-5">' +
+            '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold flex items-center justify-between">Texto Personalizado <span id="cvCharCount" class="text-zinc-600 normal-case">0/140</span></label>' +
+            '<textarea id="cvCustomText" maxlength="140" rows="4" placeholder="Digite o texto que vai aparecer no banner..." class="bg-black border-2 border-zinc-800 p-4 text-white placeholder-zinc-600 focus:outline-none focus:border-blue-500 w-full rounded-lg resize-none" data-testid="cv-custom-text"></textarea>' +
+            '<p class="text-xs text-zinc-600">O tamanho da fonte se ajusta automaticamente conforme a quantidade de texto.</p>' +
+        '</section>' +
+        '<section class="flex flex-col gap-2 mt-5">' +
+            '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold">Formato</label>' +
+            '<div class="flex gap-2">' +
+                '<button id="cvFormatPost" class="flex-1 py-3 px-2 border font-semibold text-xs uppercase tracking-wider rounded bg-white text-black border-white">Post (1:1)</button>' +
+                '<button id="cvFormatStory" class="flex-1 py-3 px-2 border font-semibold text-xs uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800">Story (9:16)</button>' +
+                '<button id="cvFormatStatus" class="flex-1 py-3 px-2 border font-semibold text-xs uppercase tracking-wider rounded bg-zinc-900 text-zinc-400 border-zinc-800">Status (1230x2050)</button>' +
+            '</div>' +
+        '</section>' +
+        '<section class="flex flex-col gap-2 mt-5">' +
+            '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold">Qualidade Final (WhatsApp HD)</label>' +
+            '<select id="cvQuality" class="bg-black border border-zinc-800 p-3 text-white text-sm w-full rounded focus:outline-none focus:border-blue-500 appearance-none cursor-pointer">' +
+                '<option value="high" selected>Alta (HD ~8 Mbps, WhatsApp HD garantido)</option>' +
+                '<option value="medium">M\u00E9dia (~5 Mbps, bom equil\u00EDbrio)</option>' +
+                '<option value="low">Baixa (~2.5 Mbps, m\u00E1xima economia)</option>' +
+            '</select>' +
+        '</section>' +
+        '<button id="cvGenerateBtn" class="w-full bg-blue-500 text-white font-bold uppercase tracking-widest py-4 hover:bg-blue-400 transition-all flex items-center justify-center gap-3 rounded-lg cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed mt-5" disabled data-testid="cv-generate-btn">GERAR BANNER MP4 (1080x1080)</button>' +
+        '<div id="cvProgressBox" class="hidden text-center mt-3"><p class="text-xs text-zinc-400 mb-2" id="cvProgressLabel">Gerando v\u00EDdeo...</p><div class="w-full bg-zinc-800 rounded-full h-2 overflow-hidden"><div id="cvProgressFill" class="h-full bg-blue-500 transition-all" style="width:0%"></div></div></div>';
+
+    setTimeout(function() {
+        document.getElementById('cvFormatPost').addEventListener('click', function() { videoFormat = 'post'; updateCustomVideoFormatButtons(); });
+        document.getElementById('cvFormatStory').addEventListener('click', function() { videoFormat = 'story'; updateCustomVideoFormatButtons(); });
+        document.getElementById('cvFormatStatus').addEventListener('click', function() { videoFormat = 'status'; updateCustomVideoFormatButtons(); });
+        document.getElementById('cvFileInput').addEventListener('change', handleCustomVideoFileUpload);
+        document.getElementById('cvCustomText').addEventListener('input', function(e) {
+            var count = e.target.value.length;
+            var cc = document.getElementById('cvCharCount');
+            if (cc) cc.textContent = count + '/140';
+            updateCustomGenerateBtnState();
+        });
+        document.getElementById('cvGenerateBtn').addEventListener('click', generateCustomTrailerBannerVideo);
+    }, 100);
+
+    canvas.classList.add('hidden');
+    videoContainer.classList.remove('hidden');
+    videoContainer.innerHTML = '<div class="text-center p-12"><div class="text-8xl mb-6">\uD83D\uDCDD</div><h3 class="font-oswald text-3xl font-bold text-blue-400 mb-3">V\u00CDDEO COM TEXTO LIVRE</h3><p class="text-zinc-400 max-w-md mx-auto">1. Carregue o v\u00EDdeo MP4 do dispositivo<br>2. Escreva o texto personalizado<br>3. Escolha formato e qualidade<br>4. Clique em <b>Gerar Banner MP4</b><br><br><span class="text-blue-400">\u2728 Mesmo padr\u00E3o visual do gerador de trailer, sem nenhuma informa\u00E7\u00E3o de filme — s\u00F3 o seu texto.</span></p></div>';
+}
+
+function updateCustomVideoFormatButtons() {
+    styleFormatButtons({ post: 'cvFormatPost', story: 'cvFormatStory', status: 'cvFormatStatus' }, videoFormat);
+    setVideoGenerateButtonLabel('cvGenerateBtn');
+}
+
+function handleCustomVideoFileUpload(e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    if (uploadedVideoUrl) { try { URL.revokeObjectURL(uploadedVideoUrl); } catch(err) {} }
+    uploadedVideoFile = file;
+    uploadedVideoUrl = URL.createObjectURL(file);
+    document.getElementById('cvFileName').textContent = file.name;
+    var prev = document.getElementById('cvPreview');
+    prev.src = uploadedVideoUrl;
+    prev.classList.remove('hidden');
+    updateCustomGenerateBtnState();
+}
+
+function updateCustomGenerateBtnState() {
+    var btn = document.getElementById('cvGenerateBtn');
+    if (!btn) return;
+    var textEl = document.getElementById('cvCustomText');
+    var hasText = !!(textEl && textEl.value.trim());
+    btn.disabled = !(uploadedVideoFile && hasText);
+}
+
+// ============================================
+// GERA BANNER VIDEO — MODO TEXTO LIVRE
+// Mesmo pipeline de gravação do modo Trailer, porém
+// desenhando as camadas "Custom" (sem dados de filme).
+// ============================================
+async function generateCustomTrailerBannerVideo() {
+    var customTextEl = document.getElementById('cvCustomText');
+    var customText = customTextEl ? customTextEl.value.trim() : '';
+    if (!uploadedVideoFile || !customText) { alert('Carregue um MP4 e escreva o texto personalizado'); return; }
+    var btn = document.getElementById('cvGenerateBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<div class="spinner mx-auto"></div>';
+    var progressBox = document.getElementById('cvProgressBox');
+    var progressLabel = document.getElementById('cvProgressLabel');
+    var progressFill = document.getElementById('cvProgressFill');
+    progressBox.classList.remove('hidden');
+    progressLabel.textContent = 'Preparando v\u00EDdeo...';
+    progressFill.style.width = '5%';
+
+    var quality = (document.getElementById('cvQuality') || {}).value || 'high';
+
+    var nativeMp4Type = detectNativeMp4Support();
+    var nativeMp4 = !!nativeMp4Type;
+    var webmTypes = [
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm'
+    ];
+    var mimeType = nativeMp4Type;
+    if (!mimeType) {
+        for (var wi = 0; wi < webmTypes.length; wi++) {
+            if (window.MediaRecorder && MediaRecorder.isTypeSupported(webmTypes[wi])) { mimeType = webmTypes[wi]; break; }
+        }
+    }
+    if (!mimeType) {
+        btn.disabled = false;
+        btn.innerHTML = getVideoGenerateLabel();
+        progressBox.classList.add('hidden');
+        alert('Navegador n\u00E3o suporta MediaRecorder');
+        return;
+    }
+
+    var recVideoBitrate, recAudioBitrate;
+    if (quality === 'high')      { recVideoBitrate = nativeMp4 ? 10000000 : 12000000; recAudioBitrate = 192000; }
+    else if (quality === 'low')  { recVideoBitrate = nativeMp4 ? 2500000 : 5000000;  recAudioBitrate = 96000;  }
+    else                         { recVideoBitrate = nativeMp4 ? 6000000 : 8000000;  recAudioBitrate = 128000; }
+
+    var srcVideo = null;
+    var recorder = null;
+    var failsafeTimer = null;
+    var stopRequested = false;
+    var audioCtxRef = null;
+    var drawIntervalId = null;
+
+    function cleanupVideoEl() {
+        try { if (drawIntervalId) clearInterval(drawIntervalId); } catch(e) {}
+        try { if (srcVideo && srcVideo.parentNode) srcVideo.parentNode.removeChild(srcVideo); } catch(e) {}
+        try { if (audioCtxRef && audioCtxRef.state !== 'closed') audioCtxRef.close(); } catch(e) {}
+    }
+
+    try {
+        var vsize = getVideoSizeInfo(videoFormat);
+        var W = vsize.W;
+        var H = vsize.H;
+        var videoAreaH = Math.round(W * 0.61);
+        var formatLabel = vsize.label;
+
+        var outCanvas = document.createElement('canvas');
+        outCanvas.width = W; outCanvas.height = H;
+        var oc = outCanvas.getContext('2d', { alpha: false });
+        oc.imageSmoothingEnabled = true;
+        oc.imageSmoothingQuality = 'high';
+
+        var staticCanvas = document.createElement('canvas');
+        staticCanvas.width = W; staticCanvas.height = H;
+        var sc = staticCanvas.getContext('2d', { alpha: false });
+        sc.imageSmoothingEnabled = true;
+        sc.imageSmoothingQuality = 'high';
+
+        videoContainer.innerHTML = '<div class="text-center"><p class="text-blue-300 mb-3 font-semibold">Gerando banner v\u00EDdeo ' + formatLabel
+            + (nativeMp4 ? ' (modo r\u00E1pido MP4 nativo)' : ' (modo compat\u00EDvel)') + '...</p></div>';
+        videoContainer.appendChild(outCanvas);
+        outCanvas.style.maxWidth = vsize.previewMax;
+        outCanvas.style.borderRadius = '12px';
+        outCanvas.style.boxShadow = '0 0 60px rgba(59,130,246,0.4)';
+
+        srcVideo = document.createElement('video');
+        srcVideo.src = uploadedVideoUrl;
+        srcVideo.preload = 'auto';
+        srcVideo.playsInline = true;
+        srcVideo.muted = false;
+        srcVideo.style.cssText = 'position:fixed;left:-99999px;top:-99999px;width:1px;height:1px;opacity:0;pointer-events:none;';
+        document.body.appendChild(srcVideo);
+
+        await new Promise(function(res, rej) {
+            var done = false;
+            var to = setTimeout(function() { if (!done) { done = true; rej(new Error('Timeout ao carregar MP4 (15s)')); } }, 15000);
+            function ok() { if (done) return; done = true; clearTimeout(to); res(); }
+            function fail() { if (done) return; done = true; clearTimeout(to); rej(new Error('Erro ao carregar MP4')); }
+            srcVideo.addEventListener('canplay', ok, { once: true });
+            srcVideo.addEventListener('loadeddata', ok, { once: true });
+            srcVideo.addEventListener('error', fail, { once: true });
+            if (srcVideo.readyState >= 3) ok();
+        });
+
+        var videoY = 0;
+        if (videoFormat === 'story' || videoFormat === 'status') {
+            videoY = renderCustomStaticStoryLayer(sc, W, H, videoAreaH, customText);
+        } else {
+            renderCustomStaticBannerLayer(sc, W, H, videoAreaH, customText);
+        }
+        oc.drawImage(staticCanvas, 0, 0);
+
+        progressLabel.textContent = 'Iniciando reprodu\u00E7\u00E3o...';
+        progressFill.style.width = '10%';
+
+        var audioStream = null;
+        var audioCtx = null;
+        try {
+            var AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (AudioCtx) {
+                audioCtx = new AudioCtx();
+                audioCtxRef = audioCtx;
+                if (audioCtx.state === 'suspended') { try { await audioCtx.resume(); } catch(e) {} }
+                var sourceNode = audioCtx.createMediaElementSource(srcVideo);
+                var destNode = audioCtx.createMediaStreamDestination();
+                sourceNode.connect(destNode);
+                var muteGain = audioCtx.createGain();
+                muteGain.gain.value = 0;
+                sourceNode.connect(muteGain);
+                muteGain.connect(audioCtx.destination);
+                audioStream = destNode.stream;
+            }
+        } catch(e) { console.warn('Web Audio API falhou:', e); }
+
+        try { srcVideo.currentTime = 0; } catch(e) {}
+        try { await srcVideo.play(); }
+        catch(e) { throw new Error('N\u00E3o foi poss\u00EDvel reproduzir o v\u00EDdeo. Tente outro arquivo.'); }
+
+        progressLabel.textContent = 'Configurando grava\u00E7\u00E3o...';
+        progressFill.style.width = '15%';
+
+        if (!audioStream) {
+            try {
+                if (typeof srcVideo.captureStream === 'function') audioStream = srcVideo.captureStream();
+                else if (typeof srcVideo.mozCaptureStream === 'function') audioStream = srcVideo.mozCaptureStream();
+            } catch(e) {}
+        }
+
+        var canvasStream = outCanvas.captureStream(30);
+        var combinedTracks = [].concat(canvasStream.getVideoTracks());
+        if (audioStream) audioStream.getAudioTracks().forEach(function(t) { combinedTracks.push(t); });
+        var combinedStream = new MediaStream(combinedTracks);
+
+        recorder = new MediaRecorder(combinedStream, {
+            mimeType: mimeType,
+            videoBitsPerSecond: recVideoBitrate,
+            audioBitsPerSecond: recAudioBitrate
+        });
+        var chunks = [];
+        recorder.ondataavailable = function(ev) { if (ev.data && ev.data.size > 0) chunks.push(ev.data); };
+        recorder.onerror = function(e) { console.error('MediaRecorder error:', e); };
+
+        var rawBlobPromise = new Promise(function(resolve, reject) {
+            recorder.onstop = function() {
+                try {
+                    if (chunks.length === 0) { reject(new Error('Nenhum dado gravado.')); return; }
+                    var ext = mimeType.indexOf('mp4') !== -1 ? 'mp4' : 'webm';
+                    var blob = new Blob(chunks, { type: mimeType.split(';')[0] });
+                    resolve({ blob: blob, ext: ext });
+                } catch(err) { reject(err); }
+            };
+        });
+
+        function drawFrame() {
+            oc.drawImage(staticCanvas, 0, 0);
+
+            if (!srcVideo.paused && !srcVideo.ended && srcVideo.readyState >= 2) {
+                var vR = srcVideo.videoWidth / srcVideo.videoHeight;
+                var aR = W / videoAreaH;
+                var dw, dh, ox, oy;
+                if (vR > aR) {
+                    // Vídeo mais largo que a área - cobre a altura toda e corta as laterais
+                    dh = videoAreaH;
+                    dw = videoAreaH * vR;
+                    ox = (W - dw) / 2;
+                    oy = 0;
+                } else {
+                    // Vídeo mais alto/estreito que a área - cobre a largura toda e corta em cima/embaixo
+                    dw = W;
+                    dh = W / vR;
+                    ox = 0;
+                    oy = (videoAreaH - dh) / 2;
+                }
+                try {
+                    oc.save();
+                    oc.beginPath();
+                    oc.rect(0, videoY, W, videoAreaH);
+                    oc.clip();
+                    oc.drawImage(srcVideo, ox, videoY + oy, dw, dh);
+                    oc.restore();
+                } catch(e) {
+                    oc.restore();
+                }
+            }
+
+            if (uploadedLogo) {
+                var logoR2 = uploadedLogo.width / uploadedLogo.height;
+                var logoH2 = 140;
+                var logoW2 = logoH2 * logoR2;
+                if (logoW2 > 320) { logoW2 = 320; logoH2 = logoW2 / logoR2; }
+                redrawWatermarkOverVideo(oc, 0, videoY, W, videoAreaH, W - logoW2 - 25, videoY + 10, logoW2, logoH2);
+            }
+
+            if (srcVideo.duration > 0) {
+                var topPct = nativeMp4 ? 95 : 50;
+                var basePct = 15;
+                var pct = Math.min(topPct, basePct + (srcVideo.currentTime / srcVideo.duration) * (topPct - basePct));
+                progressFill.style.width = pct + '%';
+                progressLabel.textContent = 'Gravando: ' + Math.floor(srcVideo.currentTime) + 's / ' + Math.floor(srcVideo.duration) + 's';
+            }
+        }
+
+        function stopRecording(reason) {
+            if (stopRequested) return;
+            stopRequested = true;
+            try { if (drawIntervalId) { clearInterval(drawIntervalId); drawIntervalId = null; } } catch(e) {}
+            try { srcVideo.pause(); } catch(e) {}
+            setTimeout(function() {
+                try {
+                    if (recorder && recorder.state !== 'inactive') {
+                        recorder.requestData();
+                        setTimeout(function() { try { if (recorder.state !== 'inactive') recorder.stop(); } catch(e) {} }, 100);
+                    }
+                } catch(e) {}
+            }, 250);
+        }
+
+        srcVideo.addEventListener('ended', function() { stopRecording('ended'); });
+        srcVideo.addEventListener('pause', function() {
+            if (srcVideo.duration > 0 && srcVideo.currentTime >= srcVideo.duration - 0.2) stopRecording('pause-near-end');
+        });
+        srcVideo.addEventListener('timeupdate', function() {
+            if (srcVideo.duration > 0 && srcVideo.currentTime >= srcVideo.duration - 0.05) stopRecording('timeupdate-end');
+        });
+
+        var maxMs = ((srcVideo.duration || 60) + 3) * 1000;
+        failsafeTimer = setTimeout(function() { stopRecording('failsafe-timeout'); }, maxMs);
+
+        progressLabel.textContent = 'Gravando...';
+        progressFill.style.width = '20%';
+        recorder.start(500);
+
+        drawIntervalId = setInterval(drawFrame, 1000 / 30);
+
+        var rawResult = await rawBlobPromise;
+        clearTimeout(failsafeTimer);
+        cleanupVideoEl();
+
+        var finalBlob = rawResult.blob;
+        var finalExt = rawResult.ext;
+        var rawSizeMB = (rawResult.blob.size / 1024 / 1024).toFixed(2);
+        var compressed = false;
+        var nativeOut = false;
+
+        if (nativeMp4 && rawResult.ext === 'mp4') {
+            nativeOut = true;
+            progressFill.style.width = '100%';
+            progressLabel.textContent = 'Finalizando...';
+        } else if (ffmpegSupported()) {
+            try {
+                progressLabel.textContent = 'Carregando compressor FFmpeg...';
+                progressFill.style.width = '55%';
+                var ffmpeg = await loadFFmpegOnce(function(ratio) {
+                    var pct = 60 + Math.max(0, Math.min(1, ratio)) * 35;
+                    progressFill.style.width = pct + '%';
+                    progressLabel.textContent = 'Convertendo WebM \u2192 MP4... ' + Math.round(ratio * 100) + '%';
+                });
+
+                progressLabel.textContent = 'Convertendo WebM \u2192 MP4...';
+                progressFill.style.width = '60%';
+
+                var inputName = 'input.' + rawResult.ext;
+                var outputName = 'output.mp4';
+                var fetchFile = window.FFmpeg.fetchFile;
+                ffmpeg.FS('writeFile', inputName, await fetchFile(rawResult.blob));
+
+                var crf, maxrate, bufsize, audioBr;
+                if (quality === 'high')      { crf = '18'; maxrate = '10000k'; bufsize = '20000k'; audioBr = '192k'; }
+                else if (quality === 'low')  { crf = '24'; maxrate = '3000k';  bufsize = '6000k';  audioBr = '96k';  }
+                else                         { crf = '20'; maxrate = '6000k';  bufsize = '12000k'; audioBr = '128k'; }
+
+                await ffmpeg.run(
+                    '-i', inputName,
+                    '-c:v', 'libx264',
+                    '-preset', 'veryfast',
+                    '-tune', 'fastdecode',
+                    '-profile:v', 'high',
+                    '-level', '4.0',
+                    '-pix_fmt', 'yuv420p',
+                    '-crf', crf,
+                    '-maxrate', maxrate,
+                    '-bufsize', bufsize,
+                    '-vf', 'scale=' + W + ':' + H + ':flags=lanczos',
+                    '-r', '30',
+                    '-c:a', 'aac',
+                    '-b:a', audioBr,
+                    '-ar', '44100',
+                    '-ac', '2',
+                    '-movflags', '+faststart',
+                    '-threads', '0',
+                    '-y', outputName
+                );
+
+                var data = ffmpeg.FS('readFile', outputName);
+                finalBlob = new Blob([data.buffer], { type: 'video/mp4' });
+                finalExt = 'mp4';
+                compressed = true;
+                try { ffmpeg.FS('unlink', inputName); ffmpeg.FS('unlink', outputName); } catch(e) {}
+            } catch (compErr) {
+                console.error('Erro na compacta\u00E7\u00E3o FFmpeg, mantendo v\u00EDdeo original:', compErr);
+            }
+        }
+
+        progressFill.style.width = '100%';
+        progressLabel.textContent = 'Conclu\u00EDdo!';
+
+        var finalSizeMB = (finalBlob.size / 1024 / 1024).toFixed(2);
+        var finalSizeBytes = finalBlob.size;
+        var savedPct = compressed ? Math.round((1 - finalBlob.size / rawResult.blob.size) * 100) : 0;
+        var url = URL.createObjectURL(finalBlob);
+        var safeTitle = customText.slice(0, 30).replace(/[^a-zA-Z0-9]/g, '_') || 'video_personalizado';
+        var formatSuffix = vsize.suffix;
+        var fileName = safeTitle + formatSuffix + '_whatsapp_hd.' + finalExt;
+        var exceedsLimit = finalSizeBytes > (100 * 1024 * 1024);
+
+        videoContainer.innerHTML = '';
+
+        var resultContainer = document.createElement('div');
+        resultContainer.className = 'w-full max-w-2xl mx-auto';
+
+        var titleDiv = document.createElement('div');
+        titleDiv.className = 'text-center mb-6';
+        titleDiv.innerHTML = '<h3 class="font-oswald text-3xl font-bold text-blue-400 mb-2">Banner Gerado com Sucesso!</h3>' +
+            '<p class="text-zinc-400 text-sm">' + vsize.title + '</p>';
+        resultContainer.appendChild(titleDiv);
+
+        var vidEl = document.createElement('video');
+        vidEl.src = url;
+        vidEl.controls = true;
+        vidEl.autoplay = true;
+        vidEl.loop = true;
+        vidEl.muted = true;
+        vidEl.style.cssText = 'width: 100%; max-width: ' + vsize.resultMax + '; border-radius: 12px; box-shadow: 0 0 60px rgba(59,130,246,0.5); margin: 0 auto; display: block;';
+        resultContainer.appendChild(vidEl);
+
+        var infoDiv = document.createElement('div');
+        infoDiv.className = 'mt-6 p-4 bg-zinc-900/50 border border-zinc-800 rounded-lg';
+        var statusHtml2 = '';
+        var resLabel = W + 'x' + H;
+        if (nativeOut) {
+            statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
+                '<span class="text-green-400 text-sm font-semibold">\u26A1 MP4 nativo (H.264 + AAC) — sem recompressão</span></div>' +
+                '<div class="text-center text-zinc-300 text-xs">' +
+                '<span class="font-bold">' + finalSizeMB + ' MB</span> · Qualidade: ' + quality.toUpperCase() + ' · ' + resLabel + '</div>';
+        } else if (compressed) {
+            statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
+                '<span class="text-green-400 text-sm font-semibold">\u2728 Convertido para MP4 (H.264 High Profile + AAC)</span></div>' +
+                '<div class="text-center text-zinc-300 text-xs">' +
+                'Original: ' + rawSizeMB + ' MB → Final: <span class="font-bold text-green-400">' + finalSizeMB + ' MB</span> ' +
+                '<span class="text-green-400">(-' + savedPct + '%)</span> · ' + resLabel + '</div>';
+        } else {
+            statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
+                '<span class="text-yellow-400 text-xs">\u26A0 Sem conversão disponível - vídeo original</span></div>' +
+                '<div class="text-center text-zinc-400 text-xs">' +
+                'Tamanho: ' + finalSizeMB + ' MB · Formato: ' + finalExt.toUpperCase() + ' · ' + resLabel + '</div>';
+        }
+        infoDiv.innerHTML = statusHtml2;
+        resultContainer.appendChild(infoDiv);
+
+        if (exceedsLimit) {
+            var warnDiv = document.createElement('div');
+            warnDiv.className = 'mt-4 p-4 bg-yellow-900/30 border border-yellow-500/50 rounded-lg';
+            warnDiv.innerHTML = '<div class="flex items-start gap-3">' +
+                '<span class="text-yellow-400 text-xl flex-shrink-0">\u26A0\uFE0F</span>' +
+                '<div>' +
+                '<p class="text-yellow-300 font-semibold text-sm mb-1">Arquivo acima de 100MB</p>' +
+                '<p class="text-yellow-200/80 text-xs leading-relaxed">O WhatsApp pode não reconhecer o vídeo em HD. O limite para envio no formato HD é de até 100MB (ou até 180MB dependendo da sua região, versão do app e velocidade da conexão). Considere usar qualidade <b>Média</b> ou <b>Baixa</b> para reduzir o tamanho.</p>' +
+                '</div></div>';
+            resultContainer.appendChild(warnDiv);
+        }
+
+        var dlBtn = document.createElement('a');
+        dlBtn.href = url;
+        dlBtn.download = fileName;
+        dlBtn.className = 'block w-full mt-6 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white font-bold uppercase tracking-wider py-5 px-8 rounded-xl cursor-pointer transition-all shadow-lg hover:shadow-blue-500/50 text-center';
+        dlBtn.innerHTML = '<span class="flex items-center justify-center gap-3">' +
+            '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">' +
+            '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>' +
+            '</svg>' +
+            '<span>BAIXAR VÍDEO HD</span></span>';
+        dlBtn.setAttribute('data-testid', 'cv-download-btn');
+        resultContainer.appendChild(dlBtn);
+
+        var fileNameDiv = document.createElement('div');
+        fileNameDiv.className = 'text-center mt-3 text-zinc-500 text-xs';
+        fileNameDiv.textContent = fileName;
+        resultContainer.appendChild(fileNameDiv);
+
+        videoContainer.appendChild(resultContainer);
+
+        setTimeout(function() { progressBox.classList.add('hidden'); }, 1500);
+
+        btn.disabled = false;
+        btn.innerHTML = getVideoGenerateLabel();
+    } catch (error) {
+        console.error('Erro:', error);
+        clearTimeout(failsafeTimer);
+        cleanupVideoEl();
+        try { if (recorder && recorder.state !== 'inactive') recorder.stop(); } catch(e) {}
+        alert('Erro ao gerar banner: ' + error.message);
+        btn.disabled = false;
+        btn.innerHTML = getVideoGenerateLabel();
+        progressBox.classList.add('hidden');
+    }
+}
+
+// ============================================
+// ÍCONES INSTAGRAM E WHATSAPP (desenhados via canvas)
+// ============================================
+function drawInstagramIcon(c, x, y, size) {
+    c.save();
+    c.strokeStyle = '#fff';
+    c.fillStyle = '#fff';
+    c.lineWidth = Math.max(2, size * 0.08);
+    c.lineJoin = 'round';
+    // Quadrado arredondado
+    var r = size * 0.25;
+    roundRect(c, x, y, size, size, r);
+    c.stroke();
+    // Círculo central
+    var cx = x + size / 2;
+    var cy = y + size / 2;
+    var radius = size * 0.22;
+    c.beginPath();
+    c.arc(cx, cy, radius, 0, Math.PI * 2);
+    c.stroke();
+    // Ponto no canto superior direito
+    var dotR = size * 0.07;
+    var dotX = x + size * 0.72;
+    var dotY = y + size * 0.28;
+    c.beginPath();
+    c.arc(dotX, dotY, dotR, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+}
+
+function drawWhatsAppIcon(c, x, y, size) {
+    c.save();
+    c.strokeStyle = '#fff';
+    c.fillStyle = '#fff';
+    c.lineWidth = Math.max(2, size * 0.08);
+    c.lineJoin = 'round';
+    c.lineCap = 'round';
+    var cx = x + size / 2;
+    var cy = y + size / 2;
+    var radius = size * 0.42;
+    // Balão de chat (círculo com rabinho)
+    c.beginPath();
+    c.arc(cx - size * 0.02, cy - size * 0.04, radius, 0, Math.PI * 2);
+    c.stroke();
+    // Rabinho do balão
+    var tailAngle = Math.PI * 0.75;
+    var bubbleCx = cx - size * 0.02;
+    var bubbleCy = cy - size * 0.04;
+    var tailBaseX = bubbleCx + Math.cos(tailAngle) * radius;
+    var tailBaseY = bubbleCy + Math.sin(tailAngle) * radius;
+    c.beginPath();
+    c.moveTo(tailBaseX + size * 0.04, tailBaseY - size * 0.02);
+    c.lineTo(tailBaseX - size * 0.1, tailBaseY + size * 0.14);
+    c.lineTo(tailBaseX - size * 0.02, tailBaseY + size * 0.06);
+    c.closePath();
+    c.fill();
+    // Aparelho telefônico (handset) - desenho mais realista
+    c.lineWidth = Math.max(2, size * 0.07);
+    var hCx = bubbleCx;
+    var hCy = bubbleCy;
+    var hR = radius * 0.42;
+    // Curva principal do handset (formato de S / banana)
+    c.beginPath();
+    c.arc(hCx, hCy - hR * 0.15, hR * 0.72, Math.PI * 1.15, Math.PI * 1.85);
+    c.stroke();
+    // Earpiece (parte superior do telefone)
+    c.beginPath();
+    c.arc(hCx - hR * 0.55, hCy - hR * 0.55, hR * 0.28, 0, Math.PI * 2);
+    c.fill();
+    // Mouthpiece (parte inferior do telefone)
+    c.beginPath();
+    c.arc(hCx + hR * 0.55, hCy - hR * 0.55, hR * 0.28, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+}
+
+// ============================================
+// UTILITIES
+// ============================================
+function showPlaceholder(icon, title, subtitle, color1, color2) {
+    canvas.width = 1080;
+    canvas.height = 1080;
+    canvas.style.maxWidth = '400px';
+    canvas.style.display = 'block';
+    var gradient = ctx.createLinearGradient(0, 0, 0, 1080);
+    gradient.addColorStop(0, color1);
+    gradient.addColorStop(1, color2);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 1080, 1080);
+    ctx.font = '200px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(icon, 540, 450);
+    ctx.font = '700 64px Oswald, sans-serif';
+    ctx.fillStyle = '#fff';
+    ctx.fillText(title, 540, 580);
+    ctx.font = '400 28px Manrope, sans-serif';
+    ctx.fillStyle = '#71717a';
+    ctx.fillText(subtitle, 540, 650);
+}
+
+// ============================================
+// ESCOLHA DE CAPA — carrega da API (TMDB) as capas disponíveis em Português
+// e deixa o usuário escolher qual usar. Usada no gerador de Banner e no de Vídeo.
+// (a TMDB identifica as capas só pelo idioma "pt", que cobre as versões do Brasil)
+// ============================================
+let posterPickerSeq = 0;
+async function loadPosterOptions(content, containerId, previewId, onChange) {
+    var box = document.getElementById(containerId);
+    if (!box || !content) return;
+    var mySeq = ++posterPickerSeq;
+    var endpoint = content.type === 'movie' ? 'movie' : 'tv';
+    var headerHtml = '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold block mb-2">Escolher capa</label>';
+    box.innerHTML = headerHtml + '<p class="text-xs text-zinc-500">Carregando capas dispon\u00EDveis...</p>';
+
+    var posters = [];
+    try {
+        var data = await tmdbApi('/' + endpoint + '/' + content.id + '/images?include_image_language=pt,null');
+        posters = data.posters || [];
+    } catch (e) {
+        console.error('Erro ao carregar capas:', e);
+        if (mySeq === posterPickerSeq) box.innerHTML = headerHtml + '<p class="text-xs text-red-400">N\u00E3o foi poss\u00EDvel carregar as capas.</p>';
+        return;
+    }
+    // Ignora se o usuário já escolheu outro conteúdo enquanto carregava
+    if (mySeq !== posterPickerSeq || selectedContent !== content) return;
+
+    var ptPosters = posters.filter(function(p) { return p.iso_639_1 === 'pt'; }).slice(0, 30);
+    var noLangPosters = posters.filter(function(p) { return !p.iso_639_1; }).slice(0, 30);
+    var activeFilter = 'pt';
+
+    function render() {
+        var list = activeFilter === 'pt' ? ptPosters : noLangPosters;
+        var html = headerHtml;
+
+        // Filtros: Português / Sem Idioma
+        html += '<div class="flex gap-2 mb-2">';
+        [['pt', 'Portugu\u00EAs', ptPosters.length], ['none', 'Sem Idioma', noLangPosters.length]].forEach(function(f) {
+            var on = activeFilter === f[0];
+            html += '<button type="button" data-filter="' + f[0] + '" class="flex-1 py-2 px-3 border text-xs font-semibold uppercase tracking-wider rounded ' +
+                    (on ? 'bg-white text-black border-white' : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:border-zinc-600') + '">' + f[1] + ' (' + f[2] + ')</button>';
+        });
+        html += '</div>';
+
+        if (list.length === 0) {
+            html += '<p class="text-xs text-zinc-500 mb-2">' + (activeFilter === 'pt' ? 'Nenhuma capa em Portugu\u00EAs encontrada para este t\u00EDtulo.' : 'Nenhuma capa sem idioma encontrada para este t\u00EDtulo.') + '</p>';
+        } else {
+            html += '<div class="flex gap-2 overflow-x-auto pb-2">';
+            list.forEach(function(p) {
+                var selected = content.posterPath === p.file_path;
+                html += '<button type="button" data-path="' + p.file_path + '" class="flex-shrink-0 rounded overflow-hidden border-2 ' + (selected ? 'border-red-500' : 'border-zinc-700 hover:border-zinc-400') + '" style="width:72px">' +
+                        '<img src="' + TMDB_IMG_BASE + '/w185' + p.file_path + '" loading="lazy" class="w-full block" style="aspect-ratio:2/3;object-fit:cover" alt="capa"></button>';
+            });
+            html += '</div>';
+        }
+        box.innerHTML = html;
+
+        box.querySelectorAll('button[data-filter]').forEach(function(btn) {
+            btn.addEventListener('click', function() { activeFilter = btn.getAttribute('data-filter'); render(); });
+        });
+        box.querySelectorAll('button[data-path]').forEach(function(btn) {
+            btn.addEventListener('click', function() { pickPoster(btn.getAttribute('data-path')); });
+        });
+    }
+
+    async function pickPoster(path) {
+        var url = getTmdbImgUrl(path);
+        try {
+            var img = await loadImage(url);
+            if (selectedContent !== content) return;
+            posterImage = img;
+            content.poster = url;
+            content.posterPath = path;
+            var preview = document.getElementById(previewId);
+            if (preview) { preview.src = url; preview.classList.remove('hidden'); }
+            render();
+            if (typeof onChange === 'function') onChange();
+        } catch (e) {
+            console.error('Erro ao carregar a capa escolhida:', e);
+            alert('N\u00E3o foi poss\u00EDvel carregar essa capa. Tente outra.');
+        }
+    }
+
+    render();
+}
+
+function loadImage(url) {
+    return new Promise(function(resolve, reject) {
+        var img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = function() { resolve(img); };
+        img.onerror = reject;
+        img.src = url;
+    });
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+}
+
+function wrapText(ctx, text, maxWidth) {
+    if (!text) return [''];
+    var words = text.split(' ');
+    var lines = [];
+    var currentLine = words[0] || '';
+    for (var i = 1; i < words.length; i++) {
+        var word = words[i];
+        var width = ctx.measureText(currentLine + ' ' + word).width;
+        if (width < maxWidth) { currentLine += ' ' + word; }
+        else { lines.push(currentLine); currentLine = word; }
+    }
+    lines.push(currentLine);
+    return lines;
+}
+
+// Init
+loadGlobalSettings();
+detectBackend();
