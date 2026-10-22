@@ -22,7 +22,7 @@ Roda 100% no navegador, hospedado de graça no GitHub. **Não precisa de servido
 1. No GitHub, clique em **New repository** (Novo repositório). Dê um nome (ex.: `banners`) e deixe como **Public**. Clique em **Create repository**.
 2. Na página do repositório, clique em **uploading an existing file** (ou *Add file → Upload files*).
 3. **Descompacte este ZIP** e arraste para a página do GitHub **todo o conteúdo da pasta** `banner-generator-pro`:
-   `index.html`, `banner-app.js`, `tailwind.js` e a pasta `vendor`. (Os arquivos devem ficar na raiz do repositório, não dentro de outra pasta.)
+   `index.html`, `banner-app.js`, `tailwind.js` e as pastas `vendor` e `assets`. (Os arquivos devem ficar na raiz do repositório, não dentro de outra pasta.)
 4. Clique em **Commit changes**.
 5. Vá em **Settings → Pages**. Em *Build and deployment*, escolha **Deploy from a branch**, branch **main**, pasta **/ (root)** e clique em **Save**.
 6. Aguarde 1 a 2 minutos. O endereço do seu site aparece no topo da página Pages, no formato:
@@ -66,3 +66,12 @@ Nos geradores você também escolhe a **capa** (em português ou sem idioma), po
 ---
 
 *Este produto usa a API do TMDB, mas não é endossado ou certificado pelo TMDB. Não remova esse aviso do sistema.*
+
+---
+
+## Histórico de versões
+Atualize o número e a data no rodapé do `index.html` (`appVersion` / `appUpdated`) e o `?v=` dos arquivos a cada alteração.
+
+- **1.2.0 — 22/10/2026:** logo movida para a pasta `assets/` e botão "Canal Oficial de Atualizações" (Telegram) no rodapé.
+- **1.1.0 — 22/10/2026:** logo no lugar do título principal, rodapé com versão, botão "Ajuda e Suporte" (Telegram).
+- **1.0.0:** versão inicial.
