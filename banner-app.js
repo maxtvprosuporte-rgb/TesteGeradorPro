@@ -1620,15 +1620,19 @@ function renderStaticBannerLayer(oc, W, H, videoAreaH) {
 // RENDER ESTÁTICO STORY (cache) — 1080x1920 (9:16 vertical)
 // Mesmo padrão do Post: Vídeo no topo + Informações embaixo + Boxes no rodapé
 // ============================================
-// Posição da logo nos formatos Story e Status (vídeo): CENTRALIZADA no topo da área do vídeo.
-// Escala proporcional à largura (Story = 1080), para Story e Status ficarem idênticos.
+// Posição da logo nos formatos Story e Status (vídeo): CENTRALIZADA ACIMA do vídeo
+// (na faixa preta acima dele, sem cobrir o vídeo). Escala proporcional à largura
+// (Story = 1080), para Story e Status ficarem idênticos.
 function storyLogoRect(W, videoY) {
     var sc = W / 1080;
     var r = uploadedLogo.width / uploadedLogo.height;
-    var h = 140 * sc;
+    var h = 200 * sc;
     var w = h * r;
-    if (w > 320 * sc) { w = 320 * sc; h = w / r; }
-    return { x: Math.round((W - w) / 2), y: Math.round(videoY + 10 * sc), w: w, h: h };
+    if (w > 480 * sc) { w = 480 * sc; h = w / r; }
+    var gap = 30 * sc;
+    var y = videoY - h - gap;
+    if (y < 10 * sc) y = 10 * sc;
+    return { x: Math.round((W - w) / 2), y: Math.round(y), w: w, h: h };
 }
 
 function renderStaticStoryLayer(oc, W, H, videoAreaH) {

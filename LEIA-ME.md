@@ -72,6 +72,7 @@ Nos geradores você também escolhe a **capa** (em português ou sem idioma), po
 ## Histórico de versões
 Atualize o número e a data no rodapé do `index.html` (`appVersion` / `appUpdated`) e o `?v=` dos arquivos a cada alteração.
 
+- **1.6.1 — 22/10/2026:** nos vídeos Story e Status (trailer e texto livre) a logo fica centralizada ACIMA do vídeo, sem cobrir a imagem.
 - **1.6.0 — 22/10/2026:** vídeos Story e Status (trailer e texto livre) com a logo centralizada no topo do vídeo, mesmo padrão nos dois.
 - **1.5.0 — 22/10/2026:** correção do ícone ao adicionar na tela de início do iPhone (apple-touch-icon na raiz, sem parâmetro de versão).
 - **1.4.0 — 22/10/2026:** aviso em vermelho nas Configurações sobre os dados ficarem salvos apenas no navegador.
