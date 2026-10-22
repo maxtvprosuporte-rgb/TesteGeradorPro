@@ -1620,6 +1620,17 @@ function renderStaticBannerLayer(oc, W, H, videoAreaH) {
 // RENDER ESTÁTICO STORY (cache) — 1080x1920 (9:16 vertical)
 // Mesmo padrão do Post: Vídeo no topo + Informações embaixo + Boxes no rodapé
 // ============================================
+// Posição da logo nos formatos Story e Status (vídeo): CENTRALIZADA no topo da área do vídeo.
+// Escala proporcional à largura (Story = 1080), para Story e Status ficarem idênticos.
+function storyLogoRect(W, videoY) {
+    var sc = W / 1080;
+    var r = uploadedLogo.width / uploadedLogo.height;
+    var h = 140 * sc;
+    var w = h * r;
+    if (w > 320 * sc) { w = 320 * sc; h = w / r; }
+    return { x: Math.round((W - w) / 2), y: Math.round(videoY + 10 * sc), w: w, h: h };
+}
+
 function renderStaticStoryLayer(oc, W, H, videoAreaH) {
     // Fundo total (preto)
     oc.fillStyle = '#000';
@@ -1647,7 +1658,7 @@ function renderStaticStoryLayer(oc, W, H, videoAreaH) {
         var logoH = 140;
         var logoW = logoH * logoR;
         if (logoW > 320) { logoW = 320; logoH = logoW / logoR; }
-        applyWatermark(oc, 0, 0, W, H, W - logoW - 25, videoY + 10, logoW, logoH);
+        var lrS = storyLogoRect(W, videoY); applyWatermark(oc, 0, 0, W, H, lrS.x, lrS.y, lrS.w, lrS.h);
     }
 
     // --- ÁREA DE INFORMAÇÕES (abaixo do vídeo) ---
@@ -2065,7 +2076,8 @@ async function generateTrailerBannerVideo() {
                 var logoH2 = 140;
                 var logoW2 = logoH2 * logoR2;
                 if (logoW2 > 320) { logoW2 = 320; logoH2 = logoW2 / logoR2; }
-                redrawWatermarkOverVideo(oc, 0, videoY, W, videoAreaH, W - logoW2 - 25, videoY + 10, logoW2, logoH2);
+                var lrR = (videoFormat === 'story' || videoFormat === 'status') ? storyLogoRect(W, videoY) : { x: W - logoW2 - 25, y: videoY + 10, w: logoW2, h: logoH2 };
+                redrawWatermarkOverVideo(oc, 0, videoY, W, videoAreaH, lrR.x, lrR.y, lrR.w, lrR.h);
             }
 
             // Progresso
@@ -2481,7 +2493,7 @@ function renderCustomStaticStoryLayer(oc, W, H, videoAreaH, customText) {
         var logoH = 140;
         var logoW = logoH * logoR;
         if (logoW > 320) { logoW = 320; logoH = logoW / logoR; }
-        applyWatermark(oc, 0, 0, W, H, W - logoW - 25, videoY + 10, logoW, logoH);
+        var lrS = storyLogoRect(W, videoY); applyWatermark(oc, 0, 0, W, H, lrS.x, lrS.y, lrS.w, lrS.h);
     }
 
     var bgGrad = oc.createLinearGradient(0, infoAreaY, 0, H);
@@ -2826,7 +2838,8 @@ async function generateCustomTrailerBannerVideo() {
                 var logoH2 = 140;
                 var logoW2 = logoH2 * logoR2;
                 if (logoW2 > 320) { logoW2 = 320; logoH2 = logoW2 / logoR2; }
-                redrawWatermarkOverVideo(oc, 0, videoY, W, videoAreaH, W - logoW2 - 25, videoY + 10, logoW2, logoH2);
+                var lrR = (videoFormat === 'story' || videoFormat === 'status') ? storyLogoRect(W, videoY) : { x: W - logoW2 - 25, y: videoY + 10, w: logoW2, h: logoH2 };
+                redrawWatermarkOverVideo(oc, 0, videoY, W, videoAreaH, lrR.x, lrR.y, lrR.w, lrR.h);
             }
 
             if (srcVideo.duration > 0) {
