@@ -72,6 +72,7 @@ Nos geradores você também escolhe a **capa** (em português ou sem idioma), po
 ## Histórico de versões
 Atualize o número e a data no rodapé do `index.html` (`appVersion` / `appUpdated`) e o `?v=` dos arquivos a cada alteração.
 
+- **1.8.0 — 23/10/2026:** arquivos baixados agora com nome + categoria (ex.: Speed_Racer_Filme.mp4 / .png); ícone do iPhone embutido no HTML (data URI) para a tela de início.
 - **1.7.0 — 23/10/2026:** nova qualidade "Redes Sociais (Full HD otimizado)" nos vídeos: recompressão H.264 (30fps constante, High Profile, faststart, leve nitidez para o texto) e bitrate maior. Compressor FFmpeg incluído em `vendor/`.
 - **1.6.1 — 22/10/2026:** nos vídeos Story e Status (trailer e texto livre) a logo fica centralizada ACIMA do vídeo, sem cobrir a imagem.
 - **1.6.0 — 22/10/2026:** vídeos Story e Status (trailer e texto livre) com a logo centralizada no topo do vídeo, mesmo padrão nos dois.

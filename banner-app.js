@@ -329,6 +329,15 @@ function ffmpegSupported() {
         && typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated;
 }
 
+// Nome do arquivo para download: Titulo_Categoria (ex.: Speed_Racer_Filme, Breaking_Bad_Serie)
+function buildDownloadBaseName(content, fallback) {
+    var t = (content && content.title) ? String(content.title) : fallback;
+    t = t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    if (!t) t = fallback;
+    var cat = content && content.type ? (content.type === 'movie' ? 'Filme' : 'Serie') : '';
+    return cat ? t + '_' + cat : t;
+}
+
 // Recompressão H.264 otimizada para redes sociais (WhatsApp / Telegram / Instagram).
 // Gera MP4 com taxa de quadros constante (30fps), High Profile, yuv420p, faststart,
 // leve nitidez no brilho (texto pequeno sobrevive melhor à recompressão das redes)
@@ -1101,7 +1110,7 @@ function downloadMovieBanner() {
         renderMovieBannerToCtx(hdCtx, baseW, baseH, isPost);
 
         var safeTitle = (selectedContent.title || 'banner').replace(/[^a-zA-Z0-9]/g, '_') || 'banner';
-        var fileName = safeTitle + '_' + currentFormat + (currentFormat === 'status' ? '_1230x2050.png' : '_FULLHD.png');
+        var fileName = buildDownloadBaseName(selectedContent, 'banner') + '.png';
 
         // toBlob em vez de toDataURL: evita manter uma string base64 gigante
         // na mem\u00F3ria (principal causa de crash de aba em imagens grandes no iOS)
@@ -2230,7 +2239,7 @@ async function generateTrailerBannerVideo() {
         var url = URL.createObjectURL(finalBlob);
         var safeTitle = (selectedContent.title || 'trailer').replace(/[^a-zA-Z0-9]/g, '_');
         var formatSuffix = vsize.suffix;
-        var fileName = safeTitle + '_trailer' + formatSuffix + '_whatsapp_hd.' + finalExt;
+        var fileName = buildDownloadBaseName(selectedContent, 'trailer') + '.' + finalExt;
         var exceedsLimit = finalSizeBytes > (100 * 1024 * 1024); // 100MB
 
         // Limpa o container e mostra o resultado final
