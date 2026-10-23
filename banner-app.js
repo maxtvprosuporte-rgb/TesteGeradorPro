@@ -2301,7 +2301,7 @@ async function generateTrailerBannerVideo() {
         if (nativeOut) {
             statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
                 '<span class="text-green-400 text-sm font-semibold">\u26A1 MP4 nativo (H.264 + AAC) — sem recompressão</span></div>' +
-                (quality === 'social' ? '<div class="text-center text-yellow-400 text-xs mb-2">\u26A0 Compress\u00E3o avan\u00E7ada indispon\u00EDvel neste servidor (faltam os cabe\u00E7alhos COOP/COEP). Veja o LEIA-ME.</div>' : '') +
+                (quality === 'social' ? '<div class="text-center text-yellow-400 text-xs mb-2">' + (/github\.io$/i.test(location.hostname) ? '\u2139\uFE0F MP4 nativo em alta qualidade (14 Mbps). O GitHub Pages n\u00E3o permite a compress\u00E3o avan\u00E7ada \u2014 veja no LEIA-ME como ativar.' : '\u26A0 Compress\u00E3o avan\u00E7ada indispon\u00EDvel neste servidor (faltam os cabe\u00E7alhos COOP/COEP). Veja o LEIA-ME.') + '</div>' : '') +
                 '<div class="text-center text-zinc-300 text-xs">' +
                 '<span class="font-bold">' + finalSizeMB + ' MB</span> · Qualidade: ' + quality.toUpperCase() + ' · ' + resLabel + '</div>';
         } else if (compressed) {
@@ -3026,7 +3026,7 @@ async function generateCustomTrailerBannerVideo() {
         if (nativeOut) {
             statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
                 '<span class="text-green-400 text-sm font-semibold">\u26A1 MP4 nativo (H.264 + AAC) — sem recompressão</span></div>' +
-                (quality === 'social' ? '<div class="text-center text-yellow-400 text-xs mb-2">\u26A0 Compress\u00E3o avan\u00E7ada indispon\u00EDvel neste servidor (faltam os cabe\u00E7alhos COOP/COEP). Veja o LEIA-ME.</div>' : '') +
+                (quality === 'social' ? '<div class="text-center text-yellow-400 text-xs mb-2">' + (/github\.io$/i.test(location.hostname) ? '\u2139\uFE0F MP4 nativo em alta qualidade (14 Mbps). O GitHub Pages n\u00E3o permite a compress\u00E3o avan\u00E7ada \u2014 veja no LEIA-ME como ativar.' : '\u26A0 Compress\u00E3o avan\u00E7ada indispon\u00EDvel neste servidor (faltam os cabe\u00E7alhos COOP/COEP). Veja o LEIA-ME.') + '</div>' : '') +
                 '<div class="text-center text-zinc-300 text-xs">' +
                 '<span class="font-bold">' + finalSizeMB + ' MB</span> · Qualidade: ' + quality.toUpperCase() + ' · ' + resLabel + '</div>';
         } else if (compressed) {

@@ -72,6 +72,10 @@ Nos geradores você também escolhe a **capa** (em português ou sem idioma), po
 ## Histórico de versões
 A cada atualização: altere o número e a data no rodapé do `index.html` (`appVersion` / `appUpdated`) e o `?v=` dos arquivos, e registre aqui a versão com a lista dos **arquivos alterados** (os que não mudaram não entram na lista).
 
+### 1.9.2 — 23/10/2026
+Aviso de compressão adaptado para quem usa GitHub Pages (explica a limitação em vez de indicar erro) e guia de como ativar a compressão avançada.
+- Arquivos alterados: `banner-app.js`, `index.html`, `LEIA-ME.md`
+
 ### 1.9.1 — 23/10/2026
 Histórico do LEIA-ME passa a informar os arquivos alterados em cada versão.
 - Arquivos alterados: `LEIA-ME.md`, `index.html` (versão no rodapé)
@@ -130,6 +134,10 @@ Versão inicial.
 Nos geradores de vídeo, a qualidade **"Redes Sociais (Full HD otimizado)"** vem selecionada por padrão.
 
 - **Com otimização completa:** o servidor precisa enviar os cabeçalhos `Cross-Origin-Opener-Policy: same-origin` e `Cross-Origin-Embedder-Policy: require-corp`. Já deixei prontos: `.htaccess` (Apache/cPanel), `_headers` (Netlify/Cloudflare Pages) e `nginx-headers.conf.example` (Nginx). Suba os arquivos da pasta `vendor` (incluindo `ffmpeg-core.wasm`, ~24 MB). Quando ativo, aparece "otimização para redes sociais" no painel do gerador.
+- **GitHub Pages não permite esses cabeçalhos.** Para ativar a compressão mantendo o GitHub como origem do código, publique o **mesmo repositório** em um serviço gratuito que aceita o arquivo `_headers` (já incluído):
+  - **Cloudflare Pages:** Workers & Pages → Create → Pages → Connect to Git → escolha o repositório → deixe o comando de build vazio e o diretório de saída como `/` → Save and Deploy. (O limite é 25 MB por arquivo; o `ffmpeg-core.wasm` tem ~24 MB e cabe.)
+  - **Netlify:** Add new site → Import from GitHub → escolha o repositório → sem comando de build e sem pasta de publicação → Deploy.
+  - A cada alteração enviada ao GitHub, o site é atualizado sozinho. O endereço muda, e as configurações salvas no navegador (chaves, logo, cores) precisam ser refeitas no novo endereço.
 - **Sem os cabeçalhos:** o sistema continua funcionando e grava o MP4 direto do navegador, agora com bitrate maior (14 Mbps).
 - Se após ativar os cabeçalhos alguma imagem externa deixar de carregar, apague o `.htaccess`/`_headers`: o sistema volta ao modo MP4 nativo.
 - **Dica ao enviar:** no WhatsApp, envie como **Documento** (sem compressão) ou escolha a opção de qualidade HD; no Telegram, desmarque a compressão / envie como arquivo; o Instagram sempre recomprime, por isso o texto pequeno do rodapé do banner é o primeiro a sofrer.
