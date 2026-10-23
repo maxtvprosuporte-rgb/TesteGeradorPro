@@ -70,18 +70,59 @@ Nos geradores você também escolhe a **capa** (em português ou sem idioma), po
 ---
 
 ## Histórico de versões
-Atualize o número e a data no rodapé do `index.html` (`appVersion` / `appUpdated`) e o `?v=` dos arquivos a cada alteração.
+A cada atualização: altere o número e a data no rodapé do `index.html` (`appVersion` / `appUpdated`) e o `?v=` dos arquivos, e registre aqui a versão com a lista dos **arquivos alterados** (os que não mudaram não entram na lista).
 
-- **1.8.0 — 23/10/2026:** arquivos baixados agora com nome + categoria (ex.: Speed_Racer_Filme.mp4 / .png); ícone do iPhone embutido no HTML (data URI) para a tela de início.
-- **1.7.0 — 23/10/2026:** nova qualidade "Redes Sociais (Full HD otimizado)" nos vídeos: recompressão H.264 (30fps constante, High Profile, faststart, leve nitidez para o texto) e bitrate maior. Compressor FFmpeg incluído em `vendor/`.
-- **1.6.1 — 22/10/2026:** nos vídeos Story e Status (trailer e texto livre) a logo fica centralizada ACIMA do vídeo, sem cobrir a imagem.
-- **1.6.0 — 22/10/2026:** vídeos Story e Status (trailer e texto livre) com a logo centralizada no topo do vídeo, mesmo padrão nos dois.
-- **1.5.0 — 22/10/2026:** correção do ícone ao adicionar na tela de início do iPhone (apple-touch-icon na raiz, sem parâmetro de versão).
-- **1.4.0 — 22/10/2026:** aviso em vermelho nas Configurações sobre os dados ficarem salvos apenas no navegador.
-- **1.3.0 — 22/10/2026:** favicon e ícone de aplicativo (Android/iOS) com a logo, manifest para "Adicionar à tela inicial".
-- **1.2.0 — 22/10/2026:** logo movida para a pasta `assets/` e botão "Canal Oficial de Atualizações" (Telegram) no rodapé.
-- **1.1.0 — 22/10/2026:** logo no lugar do título principal, rodapé com versão, botão "Ajuda e Suporte" (Telegram).
-- **1.0.0:** versão inicial.
+### 1.9.1 — 23/10/2026
+Histórico do LEIA-ME passa a informar os arquivos alterados em cada versão.
+- Arquivos alterados: `LEIA-ME.md`, `index.html` (versão no rodapé)
+
+### 1.9.0 — 23/10/2026
+Gerador de vídeo por etapas (Preparar → Gravar → Comprimir → Concluir) com indicador visual e aviso quando a compressão avançada não está disponível.
+- Arquivos alterados: `banner-app.js`, `index.html`, `LEIA-ME.md`
+
+### 1.8.0 — 23/10/2026
+Arquivos baixados com nome + categoria (ex.: `Speed_Racer_Filme.mp4` / `.png`); ícone do iPhone embutido no HTML (data URI) para a tela de início.
+- Arquivos alterados: `banner-app.js`, `index.html`, `LEIA-ME.md`
+
+### 1.7.0 — 23/10/2026
+Nova qualidade "Redes Sociais (Full HD otimizado)" nos vídeos: recompressão H.264 (30 fps constante, High Profile, faststart, leve nitidez para o texto) e bitrate maior. Compressor FFmpeg incluído em `vendor/`.
+- Arquivos alterados: `banner-app.js`, `index.html`, `LEIA-ME.md`
+- Arquivos novos: `vendor/ffmpeg-core.js`, `vendor/ffmpeg-core.wasm`, `vendor/ffmpeg-core.worker.js`, `.htaccess`, `_headers`, `nginx-headers.conf.example`
+
+### 1.6.1 — 22/10/2026
+Nos vídeos Story e Status (trailer e texto livre) a logo fica centralizada ACIMA do vídeo, sem cobrir a imagem.
+- Arquivos alterados: `banner-app.js`, `index.html`, `LEIA-ME.md`
+
+### 1.6.0 — 22/10/2026
+Vídeos Story e Status (trailer e texto livre) com a logo centralizada no topo do vídeo, mesmo padrão nos dois.
+- Arquivos alterados: `banner-app.js`, `index.html`, `LEIA-ME.md`
+
+### 1.5.0 — 22/10/2026
+Correção do ícone ao adicionar na tela de início do iPhone (apple-touch-icon na raiz, sem parâmetro de versão).
+- Arquivos alterados: `index.html`, `LEIA-ME.md`
+- Arquivos novos: `apple-touch-icon.png`, `apple-touch-icon-precomposed.png`
+
+### 1.4.0 — 22/10/2026
+Aviso em vermelho nas Configurações sobre os dados ficarem salvos apenas no navegador.
+- Arquivos alterados: `index.html`, `LEIA-ME.md`
+
+### 1.3.0 — 22/10/2026
+Favicon e ícone de aplicativo (Android/iOS) com a logo; manifest para "Adicionar à tela inicial".
+- Arquivos alterados: `index.html`, `LEIA-ME.md`
+- Arquivos novos: `favicon.ico`, `manifest.webmanifest`, `assets/icons/` (apple-touch-icon, favicon-16, favicon-32, icon-192, icon-512, icon-maskable-192, icon-maskable-512)
+
+### 1.2.0 — 22/10/2026
+Logo movida para a pasta `assets/` e botão "Canal Oficial de Atualizações" (Telegram) no rodapé.
+- Arquivos alterados: `index.html`, `LEIA-ME.md`
+- Arquivos movidos: `logo.png` → `assets/logo.png`
+
+### 1.1.0 — 22/10/2026
+Logo no lugar do título principal, rodapé com versão e botão "Ajuda e Suporte" (Telegram).
+- Arquivos alterados: `index.html`, `LEIA-ME.md`
+- Arquivos novos: `logo.png`
+
+### 1.0.0
+Versão inicial.
 
 ---
 

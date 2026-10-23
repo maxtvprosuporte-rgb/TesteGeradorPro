@@ -329,6 +329,33 @@ function ffmpegSupported() {
         && typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated;
 }
 
+// Indicador de ETAPAS do gerador de vídeo: 1 Preparar → 2 Gravar → 3 Comprimir → 4 Concluir
+// stage: 1..4 (etapa atual) | 5 (tudo concluído). skipCompress marca a etapa 3 como "pulada".
+function updateStages(progressBox, stage, skipCompress) {
+    if (!progressBox) return;
+    var key = stage + (skipCompress ? 's' : '');
+    var el = progressBox.querySelector('.bgp-stages');
+    if (!el) {
+        el = document.createElement('div');
+        el.className = 'bgp-stages flex items-center justify-between gap-1 mb-3';
+        progressBox.insertBefore(el, progressBox.firstChild);
+    }
+    if (el.getAttribute('data-stage') === key) return;
+    el.setAttribute('data-stage', key);
+    var names = ['Preparar', 'Gravar', 'Comprimir', 'Concluir'];
+    var html = '';
+    for (var i = 0; i < names.length; i++) {
+        var n = i + 1;
+        var cls, mark;
+        if (n === 3 && skipCompress && stage >= 4) { cls = 'text-zinc-600 line-through'; mark = '\u2013'; }
+        else if (stage > n) { cls = 'text-green-400'; mark = '\u2713'; }
+        else if (stage === n) { cls = 'text-purple-400 font-bold'; mark = String(n); }
+        else { cls = 'text-zinc-600'; mark = String(n); }
+        html += '<div class="flex-1 text-center text-[10px] uppercase tracking-wider ' + cls + '">' + mark + ' ' + names[i] + '</div>';
+    }
+    el.innerHTML = html;
+}
+
 // Nome do arquivo para download: Titulo_Categoria (ex.: Speed_Racer_Filme, Breaking_Bad_Serie)
 function buildDownloadBaseName(content, fallback) {
     var t = (content && content.title) ? String(content.title) : fallback;
@@ -1914,7 +1941,7 @@ async function generateTrailerBannerVideo() {
     var progressLabel = document.getElementById('videoProgressLabel');
     var progressFill = document.getElementById('videoProgressFill');
     progressBox.classList.remove('hidden');
-    progressLabel.textContent = 'Preparando v\u00EDdeo...';
+    progressLabel.textContent = 'Preparando v\u00EDdeo...'; updateStages(progressBox, 1);
     progressFill.style.width = '5%';
 
     var quality = (document.getElementById('videoQuality') || {}).value || 'high';
@@ -2020,7 +2047,7 @@ async function generateTrailerBannerVideo() {
         // Copia já pro canvas final (preview inicial)
         oc.drawImage(staticCanvas, 0, 0);
 
-        progressLabel.textContent = 'Iniciando reprodu\u00E7\u00E3o...';
+        progressLabel.textContent = 'Iniciando reprodu\u00E7\u00E3o...'; updateStages(progressBox, 1);
         progressFill.style.width = '10%';
 
         var audioStream = null;
@@ -2046,7 +2073,7 @@ async function generateTrailerBannerVideo() {
         try { await srcVideo.play(); }
         catch(e) { throw new Error('N\u00E3o foi poss\u00EDvel reproduzir o v\u00EDdeo. Tente outro arquivo.'); }
 
-        progressLabel.textContent = 'Configurando grava\u00E7\u00E3o...';
+        progressLabel.textContent = 'Configurando grava\u00E7\u00E3o...'; updateStages(progressBox, 1);
         progressFill.style.width = '15%';
 
         if (!audioStream) {
@@ -2142,7 +2169,7 @@ async function generateTrailerBannerVideo() {
                 var basePct = 15;
                 var pct = Math.min(topPct, basePct + (srcVideo.currentTime / srcVideo.duration) * (topPct - basePct));
                 progressFill.style.width = pct + '%';
-                progressLabel.textContent = 'Gravando: ' + Math.floor(srcVideo.currentTime) + 's / ' + Math.floor(srcVideo.duration) + 's';
+                updateStages(progressBox, 2); progressLabel.textContent = 'Gravando: ' + Math.floor(srcVideo.currentTime) + 's / ' + Math.floor(srcVideo.duration) + 's';
             }
         }
 
@@ -2172,7 +2199,7 @@ async function generateTrailerBannerVideo() {
         var maxMs = ((srcVideo.duration || 60) + 3) * 1000;
         failsafeTimer = setTimeout(function() { stopRecording('failsafe-timeout'); }, maxMs);
 
-        progressLabel.textContent = 'Gravando...';
+        progressLabel.textContent = 'Gravando...'; updateStages(progressBox, 2);
         progressFill.style.width = '20%';
         recorder.start(500);
 
@@ -2196,10 +2223,10 @@ async function generateTrailerBannerVideo() {
         if (nativeMp4 && rawResult.ext === 'mp4' && !needSocialPass) {
             nativeOut = true;
             progressFill.style.width = '100%';
-            progressLabel.textContent = 'Finalizando...';
+            progressLabel.textContent = 'Finalizando...'; updateStages(progressBox, 4, true);
         } else if (ffmpegSupported()) {
             try {
-                progressLabel.textContent = 'Carregando compressor FFmpeg...';
+                progressLabel.textContent = 'Carregando compressor (pode levar alguns minutos)...'; updateStages(progressBox, 3);
                 progressFill.style.width = '55%';
                 var ffmpeg = await loadFFmpegOnce(function(ratio) {
                     var pct = 60 + Math.max(0, Math.min(1, ratio)) * 35;
@@ -2231,7 +2258,7 @@ async function generateTrailerBannerVideo() {
         }
 
         progressFill.style.width = '100%';
-        progressLabel.textContent = 'Conclu\u00EDdo!';
+        progressLabel.textContent = 'Conclu\u00EDdo!'; updateStages(progressBox, 5);
 
         var finalSizeMB = (finalBlob.size / 1024 / 1024).toFixed(2);
         var finalSizeBytes = finalBlob.size;
@@ -2274,6 +2301,7 @@ async function generateTrailerBannerVideo() {
         if (nativeOut) {
             statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
                 '<span class="text-green-400 text-sm font-semibold">\u26A1 MP4 nativo (H.264 + AAC) — sem recompressão</span></div>' +
+                (quality === 'social' ? '<div class="text-center text-yellow-400 text-xs mb-2">\u26A0 Compress\u00E3o avan\u00E7ada indispon\u00EDvel neste servidor (faltam os cabe\u00E7alhos COOP/COEP). Veja o LEIA-ME.</div>' : '') +
                 '<div class="text-center text-zinc-300 text-xs">' +
                 '<span class="font-bold">' + finalSizeMB + ' MB</span> · Qualidade: ' + quality.toUpperCase() + ' · ' + resLabel + '</div>';
         } else if (compressed) {
@@ -2673,7 +2701,7 @@ async function generateCustomTrailerBannerVideo() {
     var progressLabel = document.getElementById('cvProgressLabel');
     var progressFill = document.getElementById('cvProgressFill');
     progressBox.classList.remove('hidden');
-    progressLabel.textContent = 'Preparando v\u00EDdeo...';
+    progressLabel.textContent = 'Preparando v\u00EDdeo...'; updateStages(progressBox, 1);
     progressFill.style.width = '5%';
 
     var quality = (document.getElementById('cvQuality') || {}).value || 'high';
@@ -2771,7 +2799,7 @@ async function generateCustomTrailerBannerVideo() {
         }
         oc.drawImage(staticCanvas, 0, 0);
 
-        progressLabel.textContent = 'Iniciando reprodu\u00E7\u00E3o...';
+        progressLabel.textContent = 'Iniciando reprodu\u00E7\u00E3o...'; updateStages(progressBox, 1);
         progressFill.style.width = '10%';
 
         var audioStream = null;
@@ -2797,7 +2825,7 @@ async function generateCustomTrailerBannerVideo() {
         try { await srcVideo.play(); }
         catch(e) { throw new Error('N\u00E3o foi poss\u00EDvel reproduzir o v\u00EDdeo. Tente outro arquivo.'); }
 
-        progressLabel.textContent = 'Configurando grava\u00E7\u00E3o...';
+        progressLabel.textContent = 'Configurando grava\u00E7\u00E3o...'; updateStages(progressBox, 1);
         progressFill.style.width = '15%';
 
         if (!audioStream) {
@@ -2878,7 +2906,7 @@ async function generateCustomTrailerBannerVideo() {
                 var basePct = 15;
                 var pct = Math.min(topPct, basePct + (srcVideo.currentTime / srcVideo.duration) * (topPct - basePct));
                 progressFill.style.width = pct + '%';
-                progressLabel.textContent = 'Gravando: ' + Math.floor(srcVideo.currentTime) + 's / ' + Math.floor(srcVideo.duration) + 's';
+                updateStages(progressBox, 2); progressLabel.textContent = 'Gravando: ' + Math.floor(srcVideo.currentTime) + 's / ' + Math.floor(srcVideo.duration) + 's';
             }
         }
 
@@ -2908,7 +2936,7 @@ async function generateCustomTrailerBannerVideo() {
         var maxMs = ((srcVideo.duration || 60) + 3) * 1000;
         failsafeTimer = setTimeout(function() { stopRecording('failsafe-timeout'); }, maxMs);
 
-        progressLabel.textContent = 'Gravando...';
+        progressLabel.textContent = 'Gravando...'; updateStages(progressBox, 2);
         progressFill.style.width = '20%';
         recorder.start(500);
 
@@ -2928,10 +2956,10 @@ async function generateCustomTrailerBannerVideo() {
         if (nativeMp4 && rawResult.ext === 'mp4' && !needSocialPass) {
             nativeOut = true;
             progressFill.style.width = '100%';
-            progressLabel.textContent = 'Finalizando...';
+            progressLabel.textContent = 'Finalizando...'; updateStages(progressBox, 4, true);
         } else if (ffmpegSupported()) {
             try {
-                progressLabel.textContent = 'Carregando compressor FFmpeg...';
+                progressLabel.textContent = 'Carregando compressor (pode levar alguns minutos)...'; updateStages(progressBox, 3);
                 progressFill.style.width = '55%';
                 var ffmpeg = await loadFFmpegOnce(function(ratio) {
                     var pct = 60 + Math.max(0, Math.min(1, ratio)) * 35;
@@ -2960,7 +2988,7 @@ async function generateCustomTrailerBannerVideo() {
         }
 
         progressFill.style.width = '100%';
-        progressLabel.textContent = 'Conclu\u00EDdo!';
+        progressLabel.textContent = 'Conclu\u00EDdo!'; updateStages(progressBox, 5);
 
         var finalSizeMB = (finalBlob.size / 1024 / 1024).toFixed(2);
         var finalSizeBytes = finalBlob.size;
@@ -2998,6 +3026,7 @@ async function generateCustomTrailerBannerVideo() {
         if (nativeOut) {
             statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
                 '<span class="text-green-400 text-sm font-semibold">\u26A1 MP4 nativo (H.264 + AAC) — sem recompressão</span></div>' +
+                (quality === 'social' ? '<div class="text-center text-yellow-400 text-xs mb-2">\u26A0 Compress\u00E3o avan\u00E7ada indispon\u00EDvel neste servidor (faltam os cabe\u00E7alhos COOP/COEP). Veja o LEIA-ME.</div>' : '') +
                 '<div class="text-center text-zinc-300 text-xs">' +
                 '<span class="font-bold">' + finalSizeMB + ' MB</span> · Qualidade: ' + quality.toUpperCase() + ' · ' + resLabel + '</div>';
         } else if (compressed) {
