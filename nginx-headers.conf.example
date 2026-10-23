@@ -1,0 +1,5 @@
+# Nginx - coloque dentro do bloco "server { ... }" (ou "location / { ... }") do seu site
+# e recarregue o nginx. Necessário para o compressor FFmpeg (otimização para redes sociais).
+add_header Cross-Origin-Opener-Policy "same-origin" always;
+add_header Cross-Origin-Embedder-Policy "require-corp" always;
+types { application/wasm wasm; }

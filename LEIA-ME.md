@@ -72,6 +72,7 @@ Nos geradores você também escolhe a **capa** (em português ou sem idioma), po
 ## Histórico de versões
 Atualize o número e a data no rodapé do `index.html` (`appVersion` / `appUpdated`) e o `?v=` dos arquivos a cada alteração.
 
+- **1.7.0 — 23/10/2026:** nova qualidade "Redes Sociais (Full HD otimizado)" nos vídeos: recompressão H.264 (30fps constante, High Profile, faststart, leve nitidez para o texto) e bitrate maior. Compressor FFmpeg incluído em `vendor/`.
 - **1.6.1 — 22/10/2026:** nos vídeos Story e Status (trailer e texto livre) a logo fica centralizada ACIMA do vídeo, sem cobrir a imagem.
 - **1.6.0 — 22/10/2026:** vídeos Story e Status (trailer e texto livre) com a logo centralizada no topo do vídeo, mesmo padrão nos dois.
 - **1.5.0 — 22/10/2026:** correção do ícone ao adicionar na tela de início do iPhone (apple-touch-icon na raiz, sem parâmetro de versão).
@@ -80,3 +81,13 @@ Atualize o número e a data no rodapé do `index.html` (`appVersion` / `appUpdat
 - **1.2.0 — 22/10/2026:** logo movida para a pasta `assets/` e botão "Canal Oficial de Atualizações" (Telegram) no rodapé.
 - **1.1.0 — 22/10/2026:** logo no lugar do título principal, rodapé com versão, botão "Ajuda e Suporte" (Telegram).
 - **1.0.0:** versão inicial.
+
+---
+
+## Qualidade para redes sociais (Telegram, WhatsApp, Instagram)
+Nos geradores de vídeo, a qualidade **"Redes Sociais (Full HD otimizado)"** vem selecionada por padrão.
+
+- **Com otimização completa:** o servidor precisa enviar os cabeçalhos `Cross-Origin-Opener-Policy: same-origin` e `Cross-Origin-Embedder-Policy: require-corp`. Já deixei prontos: `.htaccess` (Apache/cPanel), `_headers` (Netlify/Cloudflare Pages) e `nginx-headers.conf.example` (Nginx). Suba os arquivos da pasta `vendor` (incluindo `ffmpeg-core.wasm`, ~24 MB). Quando ativo, aparece "otimização para redes sociais" no painel do gerador.
+- **Sem os cabeçalhos:** o sistema continua funcionando e grava o MP4 direto do navegador, agora com bitrate maior (14 Mbps).
+- Se após ativar os cabeçalhos alguma imagem externa deixar de carregar, apague o `.htaccess`/`_headers`: o sistema volta ao modo MP4 nativo.
+- **Dica ao enviar:** no WhatsApp, envie como **Documento** (sem compressão) ou escolha a opção de qualidade HD; no Telegram, desmarque a compressão / envie como arquivo; o Instagram sempre recomprime, por isso o texto pequeno do rodapé do banner é o primeiro a sofrer.

@@ -329,6 +329,47 @@ function ffmpegSupported() {
         && typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated;
 }
 
+// Recompressão H.264 otimizada para redes sociais (WhatsApp / Telegram / Instagram).
+// Gera MP4 com taxa de quadros constante (30fps), High Profile, yuv420p, faststart,
+// leve nitidez no brilho (texto pequeno sobrevive melhor à recompressão das redes)
+// e deblocking reduzido para manter as bordas das letras.
+async function runSocialFFmpeg(ffmpeg, inputName, outputName, quality, W, H) {
+    var crf, maxrate, bufsize, audioBr;
+    if (quality === 'social')      { crf = '17'; maxrate = '9000k';  bufsize = '18000k'; audioBr = '192k'; }
+    else if (quality === 'high')   { crf = '18'; maxrate = '10000k'; bufsize = '20000k'; audioBr = '192k'; }
+    else if (quality === 'low')    { crf = '24'; maxrate = '3000k';  bufsize = '6000k';  audioBr = '96k';  }
+    else                           { crf = '20'; maxrate = '6000k';  bufsize = '12000k'; audioBr = '128k'; }
+    var mbs = Math.ceil(W / 16) * Math.ceil(H / 16);
+    var level = mbs <= 8192 ? '4.2' : '5.0';
+    var vf = 'scale=' + W + ':' + H + ':flags=lanczos';
+    if (quality === 'social' || quality === 'high') vf += ',unsharp=5:5:0.5:5:5:0.0';
+    vf += ',format=yuv420p';
+    await ffmpeg.run(
+        '-i', inputName,
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-profile:v', 'high',
+        '-level', level,
+        '-pix_fmt', 'yuv420p',
+        '-crf', crf,
+        '-maxrate', maxrate,
+        '-bufsize', bufsize,
+        '-x264-params', 'aq-mode=3:deblock=-1,-1',
+        '-g', '60',
+        '-vf', vf,
+        '-r', '30',
+        '-vsync', 'cfr',
+        '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709',
+        '-c:a', 'aac',
+        '-b:a', audioBr,
+        '-ar', '44100',
+        '-ac', '2',
+        '-movflags', '+faststart',
+        '-threads', '0',
+        '-y', outputName
+    );
+}
+
 async function loadFFmpegOnce(onProgress) {
     if (ffmpegInstance) return ffmpegInstance;
     if (ffmpegLoading) return ffmpegLoading;
@@ -1202,7 +1243,7 @@ async function loadVideoMode() {
     var nativeMp4Type = detectNativeMp4Support();
     var statusHtml;
     if (nativeMp4Type) {
-        statusHtml = '<span class="text-green-400">\u26A1 MP4 nativo ativado (modo r\u00E1pido)</span>';
+        statusHtml = '<span class="text-green-400">\u26A1 MP4 nativo ativado' + (ffmpegSupported() ? ' + \u2728 otimiza\u00E7\u00E3o para redes sociais' : ' (modo r\u00E1pido)') + '</span>';
     } else if (ffmpegSupported()) {
         statusHtml = '<span class="text-green-400">\u2713 Convers\u00E3o WebM\u2192MP4 ativada</span>';
     } else {
@@ -1248,7 +1289,8 @@ async function loadVideoMode() {
             '<section class="flex flex-col gap-2">' +
                 '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold">Qualidade Final (WhatsApp HD)</label>' +
                 '<select id="videoQuality" class="bg-black border border-zinc-800 p-3 text-white text-sm w-full rounded focus:outline-none focus:border-purple-500 appearance-none cursor-pointer">' +
-                    '<option value="high" selected>Alta (HD ~8 Mbps, WhatsApp HD garantido)</option>' +
+                    '<option value="social" selected>Redes Sociais (Full HD otimizado \u2014 Telegram, WhatsApp, Instagram)</option>' +
+                    '<option value="high">Alta (HD ~8 Mbps, WhatsApp HD garantido)</option>' +
                     '<option value="medium">M\u00E9dia (~5 Mbps, bom equil\u00EDbrio)</option>' +
                     '<option value="low">Baixa (~2.5 Mbps, m\u00E1xima economia)</option>' +
                 '</select>' +
@@ -1893,7 +1935,8 @@ async function generateTrailerBannerVideo() {
     // Bitrates otimizados para WhatsApp (com margem extra antes da recompressão do próprio WhatsApp)
     // Formato 1080x1080 (1:1 square) com vídeo 1080x607 (16:9) no topo
     var recVideoBitrate, recAudioBitrate;
-    if (quality === 'high')      { recVideoBitrate = nativeMp4 ? 10000000 : 12000000; recAudioBitrate = 192000; }
+    if (quality === 'social')    { recVideoBitrate = 14000000; recAudioBitrate = 192000; }
+    else if (quality === 'high') { recVideoBitrate = nativeMp4 ? 10000000 : 12000000; recAudioBitrate = 192000; }
     else if (quality === 'low')  { recVideoBitrate = nativeMp4 ? 2500000 : 5000000;  recAudioBitrate = 96000;  }
     else                         { recVideoBitrate = nativeMp4 ? 6000000 : 8000000;  recAudioBitrate = 128000; }
 
@@ -2140,7 +2183,8 @@ async function generateTrailerBannerVideo() {
         var compressed = false;
         var nativeOut = false;
 
-        if (nativeMp4 && rawResult.ext === 'mp4') {
+        var needSocialPass = (quality === 'social' && ffmpegSupported());
+        if (nativeMp4 && rawResult.ext === 'mp4' && !needSocialPass) {
             nativeOut = true;
             progressFill.style.width = '100%';
             progressLabel.textContent = 'Finalizando...';
@@ -2151,10 +2195,10 @@ async function generateTrailerBannerVideo() {
                 var ffmpeg = await loadFFmpegOnce(function(ratio) {
                     var pct = 60 + Math.max(0, Math.min(1, ratio)) * 35;
                     progressFill.style.width = pct + '%';
-                    progressLabel.textContent = 'Convertendo WebM \u2192 MP4... ' + Math.round(ratio * 100) + '%';
+                    progressLabel.textContent = 'Otimizando para redes sociais... ' + Math.round(ratio * 100) + '%';
                 });
 
-                progressLabel.textContent = 'Convertendo WebM \u2192 MP4...';
+                progressLabel.textContent = 'Otimizando para redes sociais...';
                 progressFill.style.width = '60%';
 
                 var inputName = 'input.' + rawResult.ext;
@@ -2165,35 +2209,7 @@ async function generateTrailerBannerVideo() {
                 // Configurações de compressão otimizados para WhatsApp
                 // H.264 High Profile Level 4.0 + AAC + faststart
                 // Resolução 1080x1080 (1:1 square)
-                var crf, maxrate, bufsize, audioBr;
-                if (quality === 'high')      { crf = '18'; maxrate = '10000k'; bufsize = '20000k'; audioBr = '192k'; }
-                else if (quality === 'low')  { crf = '24'; maxrate = '3000k';  bufsize = '6000k';  audioBr = '96k';  }
-                else                         { crf = '20'; maxrate = '6000k';  bufsize = '12000k'; audioBr = '128k'; }
-
-                // veryfast (em vez de ultrafast) = qualidade bem melhor por bit,
-                // ainda rápido o bastante no core com threads do ffmpeg.wasm
-                // -vf scale=1080:1080 garante resolução quadrada para WhatsApp
-                await ffmpeg.run(
-                    '-i', inputName,
-                    '-c:v', 'libx264',
-                    '-preset', 'veryfast',
-                    '-tune', 'fastdecode',
-                    '-profile:v', 'high',
-                    '-level', '4.0',
-                    '-pix_fmt', 'yuv420p',
-                    '-crf', crf,
-                    '-maxrate', maxrate,
-                    '-bufsize', bufsize,
-                    '-vf', 'scale=' + W + ':' + H + ':flags=lanczos',
-                    '-r', '30',
-                    '-c:a', 'aac',
-                    '-b:a', audioBr,
-                    '-ar', '44100',
-                    '-ac', '2',
-                    '-movflags', '+faststart',
-                    '-threads', '0',
-                    '-y', outputName
-                );
+                await runSocialFFmpeg(ffmpeg, inputName, outputName, quality, W, H);
 
                 var data = ffmpeg.FS('readFile', outputName);
                 finalBlob = new Blob([data.buffer], { type: 'video/mp4' });
@@ -2544,7 +2560,7 @@ async function loadCustomVideoMode() {
     var nativeMp4Type = detectNativeMp4Support();
     var statusHtml;
     if (nativeMp4Type) {
-        statusHtml = '<span class="text-green-400">\u26A1 MP4 nativo ativado (modo r\u00E1pido)</span>';
+        statusHtml = '<span class="text-green-400">\u26A1 MP4 nativo ativado' + (ffmpegSupported() ? ' + \u2728 otimiza\u00E7\u00E3o para redes sociais' : ' (modo r\u00E1pido)') + '</span>';
     } else if (ffmpegSupported()) {
         statusHtml = '<span class="text-green-400">\u2713 Convers\u00E3o WebM\u2192MP4 ativada</span>';
     } else {
@@ -2578,7 +2594,8 @@ async function loadCustomVideoMode() {
         '<section class="flex flex-col gap-2 mt-5">' +
             '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold">Qualidade Final (WhatsApp HD)</label>' +
             '<select id="cvQuality" class="bg-black border border-zinc-800 p-3 text-white text-sm w-full rounded focus:outline-none focus:border-blue-500 appearance-none cursor-pointer">' +
-                '<option value="high" selected>Alta (HD ~8 Mbps, WhatsApp HD garantido)</option>' +
+                '<option value="social" selected>Redes Sociais (Full HD otimizado \u2014 Telegram, WhatsApp, Instagram)</option>' +
+                    '<option value="high">Alta (HD ~8 Mbps, WhatsApp HD garantido)</option>' +
                 '<option value="medium">M\u00E9dia (~5 Mbps, bom equil\u00EDbrio)</option>' +
                 '<option value="low">Baixa (~2.5 Mbps, m\u00E1xima economia)</option>' +
             '</select>' +
@@ -2674,7 +2691,8 @@ async function generateCustomTrailerBannerVideo() {
     }
 
     var recVideoBitrate, recAudioBitrate;
-    if (quality === 'high')      { recVideoBitrate = nativeMp4 ? 10000000 : 12000000; recAudioBitrate = 192000; }
+    if (quality === 'social')    { recVideoBitrate = 14000000; recAudioBitrate = 192000; }
+    else if (quality === 'high') { recVideoBitrate = nativeMp4 ? 10000000 : 12000000; recAudioBitrate = 192000; }
     else if (quality === 'low')  { recVideoBitrate = nativeMp4 ? 2500000 : 5000000;  recAudioBitrate = 96000;  }
     else                         { recVideoBitrate = nativeMp4 ? 6000000 : 8000000;  recAudioBitrate = 128000; }
 
@@ -2897,7 +2915,8 @@ async function generateCustomTrailerBannerVideo() {
         var compressed = false;
         var nativeOut = false;
 
-        if (nativeMp4 && rawResult.ext === 'mp4') {
+        var needSocialPass = (quality === 'social' && ffmpegSupported());
+        if (nativeMp4 && rawResult.ext === 'mp4' && !needSocialPass) {
             nativeOut = true;
             progressFill.style.width = '100%';
             progressLabel.textContent = 'Finalizando...';
@@ -2908,10 +2927,10 @@ async function generateCustomTrailerBannerVideo() {
                 var ffmpeg = await loadFFmpegOnce(function(ratio) {
                     var pct = 60 + Math.max(0, Math.min(1, ratio)) * 35;
                     progressFill.style.width = pct + '%';
-                    progressLabel.textContent = 'Convertendo WebM \u2192 MP4... ' + Math.round(ratio * 100) + '%';
+                    progressLabel.textContent = 'Otimizando para redes sociais... ' + Math.round(ratio * 100) + '%';
                 });
 
-                progressLabel.textContent = 'Convertendo WebM \u2192 MP4...';
+                progressLabel.textContent = 'Otimizando para redes sociais...';
                 progressFill.style.width = '60%';
 
                 var inputName = 'input.' + rawResult.ext;
@@ -2919,32 +2938,7 @@ async function generateCustomTrailerBannerVideo() {
                 var fetchFile = window.FFmpeg.fetchFile;
                 ffmpeg.FS('writeFile', inputName, await fetchFile(rawResult.blob));
 
-                var crf, maxrate, bufsize, audioBr;
-                if (quality === 'high')      { crf = '18'; maxrate = '10000k'; bufsize = '20000k'; audioBr = '192k'; }
-                else if (quality === 'low')  { crf = '24'; maxrate = '3000k';  bufsize = '6000k';  audioBr = '96k';  }
-                else                         { crf = '20'; maxrate = '6000k';  bufsize = '12000k'; audioBr = '128k'; }
-
-                await ffmpeg.run(
-                    '-i', inputName,
-                    '-c:v', 'libx264',
-                    '-preset', 'veryfast',
-                    '-tune', 'fastdecode',
-                    '-profile:v', 'high',
-                    '-level', '4.0',
-                    '-pix_fmt', 'yuv420p',
-                    '-crf', crf,
-                    '-maxrate', maxrate,
-                    '-bufsize', bufsize,
-                    '-vf', 'scale=' + W + ':' + H + ':flags=lanczos',
-                    '-r', '30',
-                    '-c:a', 'aac',
-                    '-b:a', audioBr,
-                    '-ar', '44100',
-                    '-ac', '2',
-                    '-movflags', '+faststart',
-                    '-threads', '0',
-                    '-y', outputName
-                );
+                await runSocialFFmpeg(ffmpeg, inputName, outputName, quality, W, H);
 
                 var data = ffmpeg.FS('readFile', outputName);
                 finalBlob = new Blob([data.buffer], { type: 'video/mp4' });
