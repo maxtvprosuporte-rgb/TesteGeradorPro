@@ -72,6 +72,14 @@ Nos geradores você também escolhe a **capa** (em português ou sem idioma), po
 ## Histórico de versões
 A cada atualização: altere o número e a data no rodapé do `index.html` (`appVersion` / `appUpdated`) e o `?v=` dos arquivos, e registre aqui a versão com a lista dos **arquivos alterados** (os que não mudaram não entram na lista).
 
+### 1.9.4 — 23/10/2026
+Correção das capas (posters) que não apareciam nas listas e na seleção quando os cabeçalhos COOP/COEP estão ativos (Cloudflare/Netlify): imagens externas agora são carregadas com `crossorigin="anonymous"`.
+- Arquivos alterados: `banner-app.js`, `index.html`, `LEIA-ME.md`
+
+### 1.9.3 — 23/10/2026
+Correção da compressão que ficava em 0%: progresso real por quadros (o vídeo gravado não traz duração), interrupção automática se o compressor travar (entrega o MP4 nativo com aviso), botão "Pular compressão", preset mais rápido (superfast) e remoção do `-vsync cfr`.
+- Arquivos alterados: `banner-app.js`, `index.html`, `LEIA-ME.md`
+
 ### 1.9.2 — 23/10/2026
 Aviso de compressão adaptado para quem usa GitHub Pages (explica a limitação em vez de indicar erro) e guia de como ativar a compressão avançada.
 - Arquivos alterados: `banner-app.js`, `index.html`, `LEIA-ME.md`

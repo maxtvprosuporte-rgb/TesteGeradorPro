@@ -369,32 +369,72 @@ function buildDownloadBaseName(content, fallback) {
 // Gera MP4 com taxa de quadros constante (30fps), High Profile, yuv420p, faststart,
 // leve nitidez no brilho (texto pequeno sobrevive melhor à recompressão das redes)
 // e deblocking reduzido para manter as bordas das letras.
-async function runSocialFFmpeg(ffmpeg, inputName, outputName, quality, W, H) {
+var compressControl = { cancel: null };
+
+// Botão "Pular compressão": entrega o MP4 nativo na hora, sem esperar o compressor.
+function showSkipCompressButton(progressBox) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'mt-3 text-xs uppercase tracking-wider text-zinc-400 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded px-4 py-2 cursor-pointer';
+    btn.textContent = 'Pular compressão e usar o vídeo direto';
+    btn.addEventListener('click', function() { if (compressControl.cancel) compressControl.cancel('user-skip'); });
+    progressBox.appendChild(btn);
+    return function() { if (btn.parentNode) btn.parentNode.removeChild(btn); };
+}
+
+async function runSocialFFmpeg(ffmpeg, inputName, outputName, quality, W, H, opts) {
+    opts = opts || {};
     var crf, maxrate, bufsize, audioBr;
-    if (quality === 'social')      { crf = '17'; maxrate = '9000k';  bufsize = '18000k'; audioBr = '192k'; }
+    if (quality === 'social')      { crf = '18'; maxrate = '9000k';  bufsize = '18000k'; audioBr = '192k'; }
     else if (quality === 'high')   { crf = '18'; maxrate = '10000k'; bufsize = '20000k'; audioBr = '192k'; }
     else if (quality === 'low')    { crf = '24'; maxrate = '3000k';  bufsize = '6000k';  audioBr = '96k';  }
     else                           { crf = '20'; maxrate = '6000k';  bufsize = '12000k'; audioBr = '128k'; }
     var mbs = Math.ceil(W / 16) * Math.ceil(H / 16);
     var level = mbs <= 8192 ? '4.2' : '5.0';
     var vf = 'scale=' + W + ':' + H + ':flags=lanczos';
-    if (quality === 'social' || quality === 'high') vf += ',unsharp=5:5:0.5:5:5:0.0';
+    if (quality === 'social' || quality === 'high') vf += ',unsharp=3:3:0.6:3:3:0.0';
     vf += ',format=yuv420p';
-    await ffmpeg.run(
+
+    // Progresso real: o vídeo gravado pelo navegador não traz duração, então o FFmpeg não
+    // consegue calcular a porcentagem sozinho. Lemos o "frame=" do log e usamos a duração gravada.
+    var lastFrame = 0, lastProgressAt = Date.now(), settled = false, guardTimer = null;
+    window.__bgpFrameMode = false;
+    ffmpeg.setLogger(function(l) {
+        var m = /frame=\s*(\d+)/.exec((l && l.message) || '');
+        if (m) {
+            var f = parseInt(m[1], 10);
+            if (f > lastFrame) {
+                lastFrame = f; lastProgressAt = Date.now(); window.__bgpFrameMode = true;
+                if (opts.onFrame) opts.onFrame(f);
+            }
+        }
+    });
+
+    var guard = new Promise(function(resolve, reject) {
+        compressControl.cancel = function(reason) { reject(new Error(reason || 'cancelled')); };
+        guardTimer = setInterval(function() {
+            if (settled) return;
+            var idle = Date.now() - lastProgressAt;
+            if (lastFrame === 0 && idle > 90000) reject(new Error('stall-start'));
+            else if (lastFrame > 0 && idle > 60000) reject(new Error('stall'));
+        }, 2000);
+    });
+    guard.catch(function() {});
+
+    var runPromise = ffmpeg.run(
         '-i', inputName,
         '-c:v', 'libx264',
-        '-preset', 'veryfast',
+        '-preset', 'superfast',
         '-profile:v', 'high',
         '-level', level,
         '-pix_fmt', 'yuv420p',
         '-crf', crf,
         '-maxrate', maxrate,
         '-bufsize', bufsize,
-        '-x264-params', 'aq-mode=3:deblock=-1,-1',
+        '-x264-params', 'deblock=-1,-1',
         '-g', '60',
         '-vf', vf,
         '-r', '30',
-        '-vsync', 'cfr',
         '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709',
         '-c:a', 'aac',
         '-b:a', audioBr,
@@ -404,6 +444,21 @@ async function runSocialFFmpeg(ffmpeg, inputName, outputName, quality, W, H) {
         '-threads', '0',
         '-y', outputName
     );
+    runPromise.catch(function() {});
+
+    try {
+        await Promise.race([runPromise, guard]);
+    } catch (e) {
+        // encerra o FFmpeg travado/cancelado e força um novo carregamento na próxima vez
+        try { ffmpeg.exit(); } catch (_) {}
+        ffmpegInstance = null; ffmpegLoading = null;
+        throw e;
+    } finally {
+        settled = true;
+        clearInterval(guardTimer);
+        compressControl.cancel = null;
+        window.__bgpFrameMode = false;
+    }
 }
 
 async function loadFFmpegOnce(onProgress) {
@@ -916,7 +971,7 @@ function displayMovieResults(results) {
     if (results.length === 0) { resultsDiv.innerHTML = '<p class="text-zinc-500 text-sm p-3">Nenhum resultado</p>'; return; }
     resultsDiv.innerHTML = results.map(function(item, index) {
         return '<div class="search-result flex items-center gap-3 p-3 cursor-pointer border-b border-zinc-800 hover:bg-zinc-800/50 rounded" data-index="' + index + '">' +
-            (item.poster ? '<img src="' + item.poster + '" class="w-12 h-16 object-cover rounded">' : '<div class="w-12 h-16 bg-zinc-800 rounded flex items-center justify-center">\uD83C\uDFAC</div>') +
+            (item.poster ? '<img crossorigin="anonymous" src="' + item.poster + '" class="w-12 h-16 object-cover rounded">' : '<div class="w-12 h-16 bg-zinc-800 rounded flex items-center justify-center">\uD83C\uDFAC</div>') +
             '<div class="flex-1 min-w-0"><p class="font-semibold text-sm truncate">' + item.title + '</p><p class="text-zinc-500 text-xs">' + item.year + ' - ' + (item.type === 'movie' ? 'Filme' : 'S\u00E9rie') + ' - ' + item.rating + '</p></div></div>';
     }).join('');
     window.movieSearchResults = results;
@@ -944,7 +999,7 @@ async function selectMovie(movie) {
     } catch (e) { console.error('Erro:', e); }
     if (movie.poster) { try { posterImage = await loadImage(movie.poster); } catch (e) { posterImage = null; } } else { posterImage = null; }
     document.getElementById('movieControls').classList.remove('hidden');
-    document.getElementById('movieSelectedInfo').innerHTML = '<div class="flex gap-3 mb-3">' + (movie.poster ? '<img id="moviePosterPreview" src="' + movie.poster + '" class="w-20 h-30 object-cover rounded">' : '<img id="moviePosterPreview" class="w-20 h-30 object-cover rounded hidden">') + '<div class="flex-1"><h3 class="font-oswald text-lg font-bold">' + movie.title + '</h3><p class="text-zinc-500 text-sm">' + movie.year + ' - ' + (movie.type === 'movie' ? 'Filme' : 'S\u00E9rie') + ' - ' + movie.rating + '</p><p class="text-zinc-400 text-xs mt-2 line-clamp-3">' + movie.overview + '</p></div></div><div id="moviePosterPicker" class="mb-3"></div><button onclick="copyMovieInfo()" class="w-full bg-zinc-800 hover:bg-zinc-700 text-white text-sm font-semibold py-2 px-4 rounded-lg flex items-center justify-center gap-2">Copiar Informa\u00E7\u00F5es</button>';
+    document.getElementById('movieSelectedInfo').innerHTML = '<div class="flex gap-3 mb-3">' + (movie.poster ? '<img crossorigin="anonymous" id="moviePosterPreview" src="' + movie.poster + '" class="w-20 h-30 object-cover rounded">' : '<img crossorigin="anonymous" id="moviePosterPreview" class="w-20 h-30 object-cover rounded hidden">') + '<div class="flex-1"><h3 class="font-oswald text-lg font-bold">' + movie.title + '</h3><p class="text-zinc-500 text-sm">' + movie.year + ' - ' + (movie.type === 'movie' ? 'Filme' : 'S\u00E9rie') + ' - ' + movie.rating + '</p><p class="text-zinc-400 text-xs mt-2 line-clamp-3">' + movie.overview + '</p></div></div><div id="moviePosterPicker" class="mb-3"></div><button onclick="copyMovieInfo()" class="w-full bg-zinc-800 hover:bg-zinc-700 text-white text-sm font-semibold py-2 px-4 rounded-lg flex items-center justify-center gap-2">Copiar Informa\u00E7\u00F5es</button>';
     loadPosterOptions(movie, 'moviePosterPicker', 'moviePosterPreview', function() { generateMovieBanner(); });
     setTimeout(function() { generateMovieBanner(); }, 200);
 }
@@ -1409,7 +1464,7 @@ function displayVideoResults(results) {
     if (results.length === 0) { resultsDiv.innerHTML = '<p class="text-zinc-500 text-sm p-3">Nenhum resultado</p>'; return; }
     resultsDiv.innerHTML = results.map(function(item, index) {
         return '<div class="search-result flex items-center gap-3 p-3 cursor-pointer border-b border-zinc-800 hover:bg-zinc-800/50 rounded" data-index="' + index + '">' +
-            (item.poster ? '<img src="' + item.poster + '" class="w-12 h-16 object-cover rounded">' : '<div class="w-12 h-16 bg-zinc-800 rounded flex items-center justify-center">\uD83C\uDFAC</div>') +
+            (item.poster ? '<img crossorigin="anonymous" src="' + item.poster + '" class="w-12 h-16 object-cover rounded">' : '<div class="w-12 h-16 bg-zinc-800 rounded flex items-center justify-center">\uD83C\uDFAC</div>') +
             '<div class="flex-1 min-w-0"><p class="font-semibold text-sm truncate">' + item.title + '</p><p class="text-zinc-500 text-xs">' + item.year + ' - ' + (item.type === 'movie' ? 'Filme' : 'S\u00E9rie') + '</p></div></div>';
     }).join('');
     window.videoSearchResults = results;
@@ -1454,7 +1509,7 @@ async function selectVideoContent(content) {
 
     document.getElementById('videoSelectedInfo').innerHTML =
         '<div class="flex gap-3 mb-3">' +
-            (content.poster ? '<img id="videoPosterPreview" src="' + content.poster + '" class="w-20 h-30 object-cover rounded">' : '<img id="videoPosterPreview" class="w-20 h-30 object-cover rounded hidden">') +
+            (content.poster ? '<img crossorigin="anonymous" id="videoPosterPreview" src="' + content.poster + '" class="w-20 h-30 object-cover rounded">' : '<img crossorigin="anonymous" id="videoPosterPreview" class="w-20 h-30 object-cover rounded hidden">') +
             '<div class="flex-1"><h3 class="font-oswald text-lg font-bold">' + content.title + '</h3>' +
             '<p class="text-zinc-500 text-sm">' + content.year + ' - ' + (content.type === 'movie' ? 'Filme' : 'S\u00E9rie') + ' - \u2605 ' + content.rating + '</p>' +
             (selectedContent.genres ? '<p class="text-zinc-400 text-xs mt-1">' + selectedContent.genres + '</p>' : '') +
@@ -2218,6 +2273,7 @@ async function generateTrailerBannerVideo() {
         var rawSizeMB = (rawResult.blob.size / 1024 / 1024).toFixed(2);
         var compressed = false;
         var nativeOut = false;
+        var compressFailMsg = '';
 
         var needSocialPass = (quality === 'social' && ffmpegSupported());
         if (nativeMp4 && rawResult.ext === 'mp4' && !needSocialPass) {
@@ -2230,8 +2286,10 @@ async function generateTrailerBannerVideo() {
                 progressFill.style.width = '55%';
                 var ffmpeg = await loadFFmpegOnce(function(ratio) {
                     var pct = 60 + Math.max(0, Math.min(1, ratio)) * 35;
-                    progressFill.style.width = pct + '%';
-                    progressLabel.textContent = 'Otimizando para redes sociais... ' + Math.round(ratio * 100) + '%';
+                    if (!window.__bgpFrameMode) {
+                        progressFill.style.width = pct + '%';
+                        progressLabel.textContent = 'Otimizando para redes sociais... ' + Math.round(ratio * 100) + '%';
+                    }
                 });
 
                 progressLabel.textContent = 'Otimizando para redes sociais...';
@@ -2245,7 +2303,18 @@ async function generateTrailerBannerVideo() {
                 // Configurações de compressão otimizados para WhatsApp
                 // H.264 High Profile Level 4.0 + AAC + faststart
                 // Resolução 1080x1080 (1:1 square)
-                await runSocialFFmpeg(ffmpeg, inputName, outputName, quality, W, H);
+                var removeSkipBtn = showSkipCompressButton(progressBox);
+                var durSec = (typeof srcVideo !== 'undefined' && srcVideo && isFinite(srcVideo.duration)) ? srcVideo.duration : 0;
+                try {
+                    await runSocialFFmpeg(ffmpeg, inputName, outputName, quality, W, H, {
+                        onFrame: function(f) {
+                            var total = durSec * 30;
+                            var ratio = total > 0 ? Math.min(1, f / total) : 0;
+                            progressFill.style.width = (60 + ratio * 35) + '%';
+                            progressLabel.textContent = 'Otimizando para redes sociais... ' + (total > 0 ? Math.round(ratio * 100) + '% ' : '') + '(quadro ' + f + (total > 0 ? ' de ~' + Math.round(total) : '') + ')';
+                        }
+                    });
+                } finally { removeSkipBtn(); }
 
                 var data = ffmpeg.FS('readFile', outputName);
                 finalBlob = new Blob([data.buffer], { type: 'video/mp4' });
@@ -2254,6 +2323,8 @@ async function generateTrailerBannerVideo() {
                 try { ffmpeg.FS('unlink', inputName); ffmpeg.FS('unlink', outputName); } catch(e) {}
             } catch (compErr) {
                 console.error('Erro na compacta\u00E7\u00E3o FFmpeg, mantendo v\u00EDdeo original:', compErr);
+                compressFailMsg = (compErr && compErr.message === 'user-skip') ? 'Compress\u00E3o pulada: v\u00EDdeo entregue sem a etapa final.' : 'A compress\u00E3o demorou demais e foi interrompida: v\u00EDdeo entregue sem a etapa final.';
+                if (nativeMp4 && rawResult.ext === 'mp4') nativeOut = true;
             }
         }
 
@@ -2301,7 +2372,7 @@ async function generateTrailerBannerVideo() {
         if (nativeOut) {
             statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
                 '<span class="text-green-400 text-sm font-semibold">\u26A1 MP4 nativo (H.264 + AAC) — sem recompressão</span></div>' +
-                (quality === 'social' ? '<div class="text-center text-yellow-400 text-xs mb-2">' + (/github\.io$/i.test(location.hostname) ? '\u2139\uFE0F MP4 nativo em alta qualidade (14 Mbps). O GitHub Pages n\u00E3o permite a compress\u00E3o avan\u00E7ada \u2014 veja no LEIA-ME como ativar.' : '\u26A0 Compress\u00E3o avan\u00E7ada indispon\u00EDvel neste servidor (faltam os cabe\u00E7alhos COOP/COEP). Veja o LEIA-ME.') + '</div>' : '') +
+                (compressFailMsg ? '<div class="text-center text-yellow-400 text-xs mb-2">\u26A0 ' + compressFailMsg + '</div>' : quality === 'social' ? '<div class="text-center text-yellow-400 text-xs mb-2">' + (/github\.io$/i.test(location.hostname) ? '\u2139\uFE0F MP4 nativo em alta qualidade (14 Mbps). O GitHub Pages n\u00E3o permite a compress\u00E3o avan\u00E7ada \u2014 veja no LEIA-ME como ativar.' : '\u26A0 Compress\u00E3o avan\u00E7ada indispon\u00EDvel neste servidor (faltam os cabe\u00E7alhos COOP/COEP). Veja o LEIA-ME.') + '</div>' : '') +
                 '<div class="text-center text-zinc-300 text-xs">' +
                 '<span class="font-bold">' + finalSizeMB + ' MB</span> · Qualidade: ' + quality.toUpperCase() + ' · ' + resLabel + '</div>';
         } else if (compressed) {
@@ -2951,6 +3022,7 @@ async function generateCustomTrailerBannerVideo() {
         var rawSizeMB = (rawResult.blob.size / 1024 / 1024).toFixed(2);
         var compressed = false;
         var nativeOut = false;
+        var compressFailMsg = '';
 
         var needSocialPass = (quality === 'social' && ffmpegSupported());
         if (nativeMp4 && rawResult.ext === 'mp4' && !needSocialPass) {
@@ -2963,8 +3035,10 @@ async function generateCustomTrailerBannerVideo() {
                 progressFill.style.width = '55%';
                 var ffmpeg = await loadFFmpegOnce(function(ratio) {
                     var pct = 60 + Math.max(0, Math.min(1, ratio)) * 35;
-                    progressFill.style.width = pct + '%';
-                    progressLabel.textContent = 'Otimizando para redes sociais... ' + Math.round(ratio * 100) + '%';
+                    if (!window.__bgpFrameMode) {
+                        progressFill.style.width = pct + '%';
+                        progressLabel.textContent = 'Otimizando para redes sociais... ' + Math.round(ratio * 100) + '%';
+                    }
                 });
 
                 progressLabel.textContent = 'Otimizando para redes sociais...';
@@ -2975,7 +3049,18 @@ async function generateCustomTrailerBannerVideo() {
                 var fetchFile = window.FFmpeg.fetchFile;
                 ffmpeg.FS('writeFile', inputName, await fetchFile(rawResult.blob));
 
-                await runSocialFFmpeg(ffmpeg, inputName, outputName, quality, W, H);
+                var removeSkipBtn = showSkipCompressButton(progressBox);
+                var durSec = (typeof srcVideo !== 'undefined' && srcVideo && isFinite(srcVideo.duration)) ? srcVideo.duration : 0;
+                try {
+                    await runSocialFFmpeg(ffmpeg, inputName, outputName, quality, W, H, {
+                        onFrame: function(f) {
+                            var total = durSec * 30;
+                            var ratio = total > 0 ? Math.min(1, f / total) : 0;
+                            progressFill.style.width = (60 + ratio * 35) + '%';
+                            progressLabel.textContent = 'Otimizando para redes sociais... ' + (total > 0 ? Math.round(ratio * 100) + '% ' : '') + '(quadro ' + f + (total > 0 ? ' de ~' + Math.round(total) : '') + ')';
+                        }
+                    });
+                } finally { removeSkipBtn(); }
 
                 var data = ffmpeg.FS('readFile', outputName);
                 finalBlob = new Blob([data.buffer], { type: 'video/mp4' });
@@ -2984,6 +3069,8 @@ async function generateCustomTrailerBannerVideo() {
                 try { ffmpeg.FS('unlink', inputName); ffmpeg.FS('unlink', outputName); } catch(e) {}
             } catch (compErr) {
                 console.error('Erro na compacta\u00E7\u00E3o FFmpeg, mantendo v\u00EDdeo original:', compErr);
+                compressFailMsg = (compErr && compErr.message === 'user-skip') ? 'Compress\u00E3o pulada: v\u00EDdeo entregue sem a etapa final.' : 'A compress\u00E3o demorou demais e foi interrompida: v\u00EDdeo entregue sem a etapa final.';
+                if (nativeMp4 && rawResult.ext === 'mp4') nativeOut = true;
             }
         }
 
@@ -3026,7 +3113,7 @@ async function generateCustomTrailerBannerVideo() {
         if (nativeOut) {
             statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
                 '<span class="text-green-400 text-sm font-semibold">\u26A1 MP4 nativo (H.264 + AAC) — sem recompressão</span></div>' +
-                (quality === 'social' ? '<div class="text-center text-yellow-400 text-xs mb-2">' + (/github\.io$/i.test(location.hostname) ? '\u2139\uFE0F MP4 nativo em alta qualidade (14 Mbps). O GitHub Pages n\u00E3o permite a compress\u00E3o avan\u00E7ada \u2014 veja no LEIA-ME como ativar.' : '\u26A0 Compress\u00E3o avan\u00E7ada indispon\u00EDvel neste servidor (faltam os cabe\u00E7alhos COOP/COEP). Veja o LEIA-ME.') + '</div>' : '') +
+                (compressFailMsg ? '<div class="text-center text-yellow-400 text-xs mb-2">\u26A0 ' + compressFailMsg + '</div>' : quality === 'social' ? '<div class="text-center text-yellow-400 text-xs mb-2">' + (/github\.io$/i.test(location.hostname) ? '\u2139\uFE0F MP4 nativo em alta qualidade (14 Mbps). O GitHub Pages n\u00E3o permite a compress\u00E3o avan\u00E7ada \u2014 veja no LEIA-ME como ativar.' : '\u26A0 Compress\u00E3o avan\u00E7ada indispon\u00EDvel neste servidor (faltam os cabe\u00E7alhos COOP/COEP). Veja o LEIA-ME.') + '</div>' : '') +
                 '<div class="text-center text-zinc-300 text-xs">' +
                 '<span class="font-bold">' + finalSizeMB + ' MB</span> · Qualidade: ' + quality.toUpperCase() + ' · ' + resLabel + '</div>';
         } else if (compressed) {
@@ -3241,7 +3328,7 @@ async function loadPosterOptions(content, containerId, previewId, onChange) {
             list.forEach(function(p) {
                 var selected = content.posterPath === p.file_path;
                 html += '<button type="button" data-path="' + p.file_path + '" class="flex-shrink-0 rounded overflow-hidden border-2 ' + (selected ? 'border-red-500' : 'border-zinc-700 hover:border-zinc-400') + '" style="width:72px">' +
-                        '<img src="' + TMDB_IMG_BASE + '/w185' + p.file_path + '" loading="lazy" class="w-full block" style="aspect-ratio:2/3;object-fit:cover" alt="capa"></button>';
+                        '<img crossorigin="anonymous" src="' + TMDB_IMG_BASE + '/w185' + p.file_path + '" loading="lazy" class="w-full block" style="aspect-ratio:2/3;object-fit:cover" alt="capa"></button>';
             });
             html += '</div>';
         }
