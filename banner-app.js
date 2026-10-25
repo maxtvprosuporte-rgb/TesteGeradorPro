@@ -130,7 +130,9 @@ async function testTmdbKey(key) {
 
 // Detecta se existe o servidor opcional (server.js). No GitHub Pages não existe.
 function detectBackend() {
-    return fetchWithTimeout(API_BASE_URL + '/health', { cache: 'no-store' }, 2500)
+    // GitHub Pages e Cloudflare Pages são hospedagens estáticas: não existe servidor, então não há o que sondar
+    if (detectHostingPlatform() !== 'other') { backendAvailable = false; updateApiKeyNotice(); return Promise.resolve(); }
+    return Promise.resolve().then(function() { return fetchWithTimeout(API_BASE_URL + '/health', { cache: 'no-store' }, 2500); })
         .then(function(r) { return r.ok ? r.json() : null; })
         .then(function(j) { backendAvailable = !!(j && j.status === 'OK'); })
         .catch(function() { backendAvailable = false; })
@@ -327,6 +329,147 @@ let ffmpegLoading = null;
 function ffmpegSupported() {
     return typeof window !== 'undefined' && typeof window.FFmpeg !== 'undefined'
         && typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated;
+}
+
+// ============================================
+// HOSPEDAGEM (GitHub Pages × Cloudflare Pages)
+// O sistema identifica sozinho onde está rodando — sem nenhum endereço fixo no código,
+// então cada comprador usa os próprios endereços publicados.
+// - GitHub Pages (*.github.io): não permite os cabeçalhos COOP/COEP -> sem compressão otimizada.
+// - Cloudflare Pages (*.pages.dev) com o arquivo _headers: cabeçalhos ativos -> compressão otimizada.
+// - Outro endereço/domínio próprio: a compressão é liberada se os cabeçalhos e o navegador permitirem.
+// Opcional: site-config.js (BGP_SITE_CONFIG) aceita os endereços/domínios do próprio comprador.
+// ============================================
+function getSiteConfig() {
+    var c = window.BGP_SITE_CONFIG || {};
+    function list(a) { return (Array.isArray(a) ? a : []).map(function(s) { return String(s || '').trim().toLowerCase(); }).filter(Boolean); }
+    function safeUrl(u) { try { var x = new URL(String(u || '').trim()); return /^https?:$/.test(x.protocol) ? x.href : ''; } catch (e) { return ''; } }
+    var gh = safeUrl(c.githubPagesUrl), cf = safeUrl(c.cloudflarePagesUrl);
+    var ghHosts = list(c.githubHosts), cfHosts = list(c.cloudflareHosts);
+    if (gh) ghHosts.push(new URL(gh).hostname.toLowerCase());
+    if (cf) cfHosts.push(new URL(cf).hostname.toLowerCase());
+    return { githubUrl: gh, cloudflareUrl: cf, githubHosts: ghHosts, cloudflareHosts: cfHosts };
+}
+
+function detectHostingPlatform() {
+    var host = (location.hostname || '').toLowerCase();
+    var cfg = getSiteConfig();
+    if (/\.github\.io$/.test(host) || cfg.githubHosts.indexOf(host) !== -1) return 'github';
+    if (/\.pages\.dev$/.test(host) || cfg.cloudflareHosts.indexOf(host) !== -1) return 'cloudflare';
+    return 'other';
+}
+
+// Diagnóstico único usado por todos os avisos: onde estamos e se a compressão otimizada está disponível
+function getHostingInfo() {
+    var cfg = getSiteConfig();
+    var platform = detectHostingPlatform();
+    var lib = typeof window.FFmpeg !== 'undefined';
+    var sab = typeof SharedArrayBuffer !== 'undefined';
+    var isolated = !!window.crossOriginIsolated;
+    var canCompress = !!ffmpegSupported();
+    var reason = '';
+    if (!canCompress) {
+        if (platform === 'github') reason = 'platform';   // limitação da hospedagem (não é erro)
+        else if (!lib) reason = 'lib';                     // vendor/ffmpeg.min.js não carregou
+        else if (!isolated) reason = 'headers';            // cabeçalhos COOP/COEP ausentes neste endereço
+        else if (!sab) reason = 'browser';                 // navegador sem SharedArrayBuffer
+        else reason = 'unknown';
+    }
+    var label = platform === 'github' ? 'GitHub Pages' : platform === 'cloudflare' ? 'Cloudflare Pages' : 'Hospedagem própria';
+    return { platform: platform, label: label, isolated: isolated, sab: sab, lib: lib, canCompress: canCompress, reason: reason, cloudflareUrl: cfg.cloudflareUrl, githubUrl: cfg.githubUrl };
+}
+
+// Link para a OUTRA versão — só aparece se o comprador preencheu o endereço no site-config.js
+function hostingLinkHtml(info) {
+    info = info || getHostingInfo();
+    var cls = 'underline text-sky-400 hover:text-sky-300';
+    if (!info.canCompress && info.platform !== 'cloudflare' && info.cloudflareUrl) {
+        return ' <a href="' + info.cloudflareUrl + '" target="_blank" rel="noopener noreferrer" class="' + cls + '" data-testid="hosting-link">Abrir a vers\u00E3o com compress\u00E3o</a>';
+    }
+    if (info.canCompress && info.platform === 'cloudflare' && info.githubUrl) {
+        return ' <a href="' + info.githubUrl + '" target="_blank" rel="noopener noreferrer" class="' + cls + '" data-testid="hosting-link">Abrir a vers\u00E3o GitHub Pages</a>';
+    }
+    return '';
+}
+
+// Texto curto exibido no painel dos geradores de vídeo (antes de gerar)
+function hostingPanelText(info) {
+    info = info || getHostingInfo();
+    if (info.canCompress) return '\u2728 Compress\u00E3o otimizada de MP4 dispon\u00EDvel';
+    switch (info.reason) {
+        case 'platform': return 'Vers\u00E3o GitHub Pages: voc\u00EA cria banners e v\u00EDdeos normalmente. A compress\u00E3o otimizada de MP4 est\u00E1 dispon\u00EDvel na vers\u00E3o do Cloudflare Pages.';
+        case 'lib': return 'O compressor n\u00E3o foi carregado (confira se a pasta vendor foi publicada). Os v\u00EDdeos continuam sendo gerados normalmente.';
+        case 'headers': return info.platform === 'cloudflare'
+            ? 'A compress\u00E3o otimizada est\u00E1 inativa: os cabe\u00E7alhos do arquivo _headers n\u00E3o foram aplicados neste endere\u00E7o. Os v\u00EDdeos continuam sendo gerados normalmente.'
+            : 'Compress\u00E3o otimizada indispon\u00EDvel neste endere\u00E7o (a hospedagem n\u00E3o envia os cabe\u00E7alhos COOP/COEP). Ela funciona na vers\u00E3o do Cloudflare Pages.';
+        case 'browser': return 'Este navegador n\u00E3o oferece os recursos da compress\u00E3o otimizada (SharedArrayBuffer). Os v\u00EDdeos continuam sendo gerados normalmente.';
+        default: return 'A compress\u00E3o otimizada n\u00E3o est\u00E1 dispon\u00EDvel agora. Os v\u00EDdeos continuam sendo gerados normalmente.';
+    }
+}
+function hostingPanelHtml() { var i = getHostingInfo(); return hostingPanelText(i) + hostingLinkHtml(i); }
+
+// Frase usada no resultado quando o vídeo foi entregue sem a etapa de compressão (limitação, não erro)
+function hostingNoCompressionNote(info) {
+    info = info || getHostingInfo();
+    switch (info.reason) {
+        case 'platform': return 'Compress\u00E3o otimizada indispon\u00EDvel nesta vers\u00E3o (GitHub Pages) \u2014 ela est\u00E1 dispon\u00EDvel na vers\u00E3o do Cloudflare Pages. O v\u00EDdeo foi gerado normalmente';
+        case 'lib': return 'O compressor n\u00E3o foi carregado (confira a pasta vendor). O v\u00EDdeo foi gerado normalmente';
+        case 'headers': return info.platform === 'cloudflare'
+            ? 'A compress\u00E3o otimizada est\u00E1 inativa (cabe\u00E7alhos do arquivo _headers n\u00E3o aplicados). O v\u00EDdeo foi gerado normalmente'
+            : 'Compress\u00E3o otimizada indispon\u00EDvel neste endere\u00E7o \u2014 ela funciona na vers\u00E3o do Cloudflare Pages. O v\u00EDdeo foi gerado normalmente';
+        case 'browser': return 'Este navegador n\u00E3o oferece os recursos da compress\u00E3o otimizada. O v\u00EDdeo foi gerado normalmente';
+        default: return 'A compress\u00E3o otimizada n\u00E3o est\u00E1 dispon\u00EDvel agora. O v\u00EDdeo foi gerado normalmente';
+    }
+}
+function hostingResultNoticeHtml() {
+    var i = getHostingInfo();
+    return '<div class="text-center text-sky-300 text-xs mb-2" data-testid="hosting-result-note">\u2139\uFE0F ' + hostingNoCompressionNote(i) + '.' + hostingLinkHtml(i) + '</div>';
+}
+
+// Linha do painel quando o navegador só grava WebM e não há conversão para MP4
+function hostingNoMp4Text() {
+    var i = getHostingInfo();
+    if (i.reason === 'platform') return '\u2139\uFE0F Este navegador grava v\u00EDdeos em WebM. A convers\u00E3o para MP4 est\u00E1 dispon\u00EDvel na vers\u00E3o do Cloudflare Pages.';
+    return '\u2139\uFE0F Este navegador grava v\u00EDdeos em WebM e a convers\u00E3o para MP4 n\u00E3o est\u00E1 dispon\u00EDvel agora.';
+}
+
+// Explicação completa (Configurações) + selo no rodapé, de acordo com a plataforma detectada
+function renderHostingInfo() {
+    var i = getHostingInfo();
+    var badge = document.getElementById('hostingBadge');
+    if (badge) badge.textContent = 'Hospedagem: ' + i.label + ' \u00B7 Compress\u00E3o otimizada: ' + (i.canCompress ? 'ativa' : 'indispon\u00EDvel aqui');
+    var body = document.getElementById('hostingInfoBody');
+    if (!body) return;
+    var status = '<p class="mb-3 text-zinc-300">Vers\u00E3o em uso: <b>' + i.label + '</b> \u2014 compress\u00E3o otimizada: ' +
+        (i.canCompress ? '<b class="text-green-400">ativa</b>' : '<b class="text-yellow-400">indispon\u00EDvel aqui</b>') + '</p>';
+    var html;
+    if (i.platform === 'github') {
+        html = '<p class="mb-2">A compress\u00E3o otimizada est\u00E1 dispon\u00EDvel na vers\u00E3o do gerador hospedada no Cloudflare Pages. Na vers\u00E3o do GitHub Pages, voc\u00EA pode criar banners e v\u00EDdeos normalmente, mas sem essa etapa de compress\u00E3o otimizada.</p>' +
+               '<p class="mb-2">Se voc\u00EA precisa reduzir o tamanho final dos arquivos MP4, utilize a vers\u00E3o do Cloudflare Pages. Se deseja apenas criar seus banners e v\u00EDdeos, a vers\u00E3o do GitHub Pages pode atender \u00E0s suas necessidades.</p>' +
+               (i.cloudflareUrl ? '<p>' + hostingLinkHtml(i).trim() + '</p>' : '<p class="text-zinc-500">Se o administrador deste site publicou a vers\u00E3o do Cloudflare Pages, pe\u00E7a o endere\u00E7o a ele.</p>');
+    } else if (i.canCompress) {
+        html = '<p class="mb-2">Voc\u00EA est\u00E1 usando uma vers\u00E3o com compress\u00E3o otimizada de v\u00EDdeos MP4. Ela roda na etapa final da gera\u00E7\u00E3o e reduz o tamanho do arquivo. Se a compress\u00E3o demorar demais, use o bot\u00E3o \u201CPular compress\u00E3o\u201D para ficar com o v\u00EDdeo original.</p>' +
+               '<p class="mb-2">Se deseja apenas criar seus banners e v\u00EDdeos, a vers\u00E3o do GitHub Pages tamb\u00E9m atende.</p>' +
+               (i.githubUrl ? '<p>' + hostingLinkHtml(i).trim() + '</p>' : '');
+    } else {
+        html = '<p class="mb-2">' + hostingPanelText(i) + '</p>' +
+               '<p class="mb-2">Se voc\u00EA precisa reduzir o tamanho final dos arquivos MP4, utilize a vers\u00E3o do Cloudflare Pages.</p>' +
+               (i.cloudflareUrl ? '<p>' + hostingLinkHtml(i).trim() + '</p>' : '');
+    }
+    body.innerHTML = status + html;
+}
+
+// Capa que não carregou: mostra um ícone no lugar (em vez da imagem quebrada) e registra o motivo provável
+function bgpImgFallback(img) {
+    if (!img || img.getAttribute('data-failed')) return;
+    img.setAttribute('data-failed', '1');
+    try { console.warn('Capa n\u00E3o carregou:', img.currentSrc || img.src, '\u2014 verifique a conex\u00E3o e se o navegador/rede permite imagens da TMDB.'); } catch (e) {}
+    if (img.id) { img.style.visibility = 'hidden'; return; }   // a pré-visualização é reaproveitada ao escolher outra capa
+    var ph = document.createElement('div');
+    ph.className = (img.className || '') + ' bg-zinc-800 flex items-center justify-center text-zinc-500';
+    ph.textContent = '\uD83C\uDFAC';
+    ph.title = 'Capa indispon\u00EDvel';
+    if (img.parentNode) img.parentNode.replaceChild(ph, img);
 }
 
 // Indicador de ETAPAS do gerador de vídeo: 1 Preparar → 2 Gravar → 3 Comprimir → 4 Concluir
@@ -665,7 +808,7 @@ function setupBoxIconUpload(key) {
 }
 ['instagram', 'whatsapp', 'cta'].forEach(setupBoxIconUpload);
 
-function openSettings() { document.getElementById('settingsModal').classList.add('active'); }
+function openSettings() { renderHostingInfo(); document.getElementById('settingsModal').classList.add('active'); }
 // Controles das chaves da API: mostrar/ocultar e "Testar chaves"
 function setupTmdbKeyControls() {
     [1, 2, 3].forEach(function(n) {
@@ -971,7 +1114,7 @@ function displayMovieResults(results) {
     if (results.length === 0) { resultsDiv.innerHTML = '<p class="text-zinc-500 text-sm p-3">Nenhum resultado</p>'; return; }
     resultsDiv.innerHTML = results.map(function(item, index) {
         return '<div class="search-result flex items-center gap-3 p-3 cursor-pointer border-b border-zinc-800 hover:bg-zinc-800/50 rounded" data-index="' + index + '">' +
-            (item.poster ? '<img crossorigin="anonymous" src="' + item.poster + '" class="w-12 h-16 object-cover rounded">' : '<div class="w-12 h-16 bg-zinc-800 rounded flex items-center justify-center">\uD83C\uDFAC</div>') +
+            (item.poster ? '<img crossorigin="anonymous" onerror="bgpImgFallback(this)" src="' + item.poster + '" class="w-12 h-16 object-cover rounded">' : '<div class="w-12 h-16 bg-zinc-800 rounded flex items-center justify-center">\uD83C\uDFAC</div>') +
             '<div class="flex-1 min-w-0"><p class="font-semibold text-sm truncate">' + item.title + '</p><p class="text-zinc-500 text-xs">' + item.year + ' - ' + (item.type === 'movie' ? 'Filme' : 'S\u00E9rie') + ' - ' + item.rating + '</p></div></div>';
     }).join('');
     window.movieSearchResults = results;
@@ -999,7 +1142,7 @@ async function selectMovie(movie) {
     } catch (e) { console.error('Erro:', e); }
     if (movie.poster) { try { posterImage = await loadImage(movie.poster); } catch (e) { posterImage = null; } } else { posterImage = null; }
     document.getElementById('movieControls').classList.remove('hidden');
-    document.getElementById('movieSelectedInfo').innerHTML = '<div class="flex gap-3 mb-3">' + (movie.poster ? '<img crossorigin="anonymous" id="moviePosterPreview" src="' + movie.poster + '" class="w-20 h-30 object-cover rounded">' : '<img crossorigin="anonymous" id="moviePosterPreview" class="w-20 h-30 object-cover rounded hidden">') + '<div class="flex-1"><h3 class="font-oswald text-lg font-bold">' + movie.title + '</h3><p class="text-zinc-500 text-sm">' + movie.year + ' - ' + (movie.type === 'movie' ? 'Filme' : 'S\u00E9rie') + ' - ' + movie.rating + '</p><p class="text-zinc-400 text-xs mt-2 line-clamp-3">' + movie.overview + '</p></div></div><div id="moviePosterPicker" class="mb-3"></div><button onclick="copyMovieInfo()" class="w-full bg-zinc-800 hover:bg-zinc-700 text-white text-sm font-semibold py-2 px-4 rounded-lg flex items-center justify-center gap-2">Copiar Informa\u00E7\u00F5es</button>';
+    document.getElementById('movieSelectedInfo').innerHTML = '<div class="flex gap-3 mb-3">' + (movie.poster ? '<img crossorigin="anonymous" onerror="bgpImgFallback(this)" id="moviePosterPreview" src="' + movie.poster + '" class="w-20 h-30 object-cover rounded">' : '<img crossorigin="anonymous" onerror="bgpImgFallback(this)" id="moviePosterPreview" class="w-20 h-30 object-cover rounded hidden">') + '<div class="flex-1"><h3 class="font-oswald text-lg font-bold">' + movie.title + '</h3><p class="text-zinc-500 text-sm">' + movie.year + ' - ' + (movie.type === 'movie' ? 'Filme' : 'S\u00E9rie') + ' - ' + movie.rating + '</p><p class="text-zinc-400 text-xs mt-2 line-clamp-3">' + movie.overview + '</p></div></div><div id="moviePosterPicker" class="mb-3"></div><button onclick="copyMovieInfo()" class="w-full bg-zinc-800 hover:bg-zinc-700 text-white text-sm font-semibold py-2 px-4 rounded-lg flex items-center justify-center gap-2">Copiar Informa\u00E7\u00F5es</button>';
     loadPosterOptions(movie, 'moviePosterPicker', 'moviePosterPreview', function() { generateMovieBanner(); });
     setTimeout(function() { generateMovieBanner(); }, 200);
 }
@@ -1338,11 +1481,11 @@ async function loadVideoMode() {
     } else if (ffmpegSupported()) {
         statusHtml = '<span class="text-green-400">\u2713 Convers\u00E3o WebM\u2192MP4 ativada</span>';
     } else {
-        statusHtml = '<span class="text-yellow-400">\u26A0 Sem convers\u00E3o - v\u00EDdeo sair\u00E1 em WebM</span>';
+        statusHtml = '<span class="text-yellow-400">' + hostingNoMp4Text() + '</span>';
     }
 
     controlPanel.innerHTML =
-        '<header class="border-b border-zinc-800 pb-5"><h2 class="font-oswald text-2xl font-bold text-purple-400">Trailer em Vídeo</h2><p class="text-zinc-500 text-sm mt-2">Carregue um vídeo MP4 e gere o banner otimizado para WhatsApp (1080x1080)</p><p class="text-xs mt-2">' + statusHtml + '</p></header>' +
+        '<header class="border-b border-zinc-800 pb-5"><h2 class="font-oswald text-2xl font-bold text-purple-400">Trailer em Vídeo</h2><p class="text-zinc-500 text-sm mt-2">Carregue um vídeo MP4 e gere o banner otimizado para WhatsApp (1080x1080)</p><p class="text-xs mt-2">' + statusHtml + '</p><p class="text-xs mt-1 text-zinc-500" data-testid="hosting-note">' + hostingPanelHtml() + '</p></header>' +
         '<section class="mt-5">' +
             '<label class="text-xs uppercase tracking-widest text-zinc-500 font-semibold block mb-3">Tipo de Conte\u00FAdo</label>' +
             '<div class="flex gap-2">' +
@@ -1464,7 +1607,7 @@ function displayVideoResults(results) {
     if (results.length === 0) { resultsDiv.innerHTML = '<p class="text-zinc-500 text-sm p-3">Nenhum resultado</p>'; return; }
     resultsDiv.innerHTML = results.map(function(item, index) {
         return '<div class="search-result flex items-center gap-3 p-3 cursor-pointer border-b border-zinc-800 hover:bg-zinc-800/50 rounded" data-index="' + index + '">' +
-            (item.poster ? '<img crossorigin="anonymous" src="' + item.poster + '" class="w-12 h-16 object-cover rounded">' : '<div class="w-12 h-16 bg-zinc-800 rounded flex items-center justify-center">\uD83C\uDFAC</div>') +
+            (item.poster ? '<img crossorigin="anonymous" onerror="bgpImgFallback(this)" src="' + item.poster + '" class="w-12 h-16 object-cover rounded">' : '<div class="w-12 h-16 bg-zinc-800 rounded flex items-center justify-center">\uD83C\uDFAC</div>') +
             '<div class="flex-1 min-w-0"><p class="font-semibold text-sm truncate">' + item.title + '</p><p class="text-zinc-500 text-xs">' + item.year + ' - ' + (item.type === 'movie' ? 'Filme' : 'S\u00E9rie') + '</p></div></div>';
     }).join('');
     window.videoSearchResults = results;
@@ -1509,7 +1652,7 @@ async function selectVideoContent(content) {
 
     document.getElementById('videoSelectedInfo').innerHTML =
         '<div class="flex gap-3 mb-3">' +
-            (content.poster ? '<img crossorigin="anonymous" id="videoPosterPreview" src="' + content.poster + '" class="w-20 h-30 object-cover rounded">' : '<img crossorigin="anonymous" id="videoPosterPreview" class="w-20 h-30 object-cover rounded hidden">') +
+            (content.poster ? '<img crossorigin="anonymous" onerror="bgpImgFallback(this)" id="videoPosterPreview" src="' + content.poster + '" class="w-20 h-30 object-cover rounded">' : '<img crossorigin="anonymous" onerror="bgpImgFallback(this)" id="videoPosterPreview" class="w-20 h-30 object-cover rounded hidden">') +
             '<div class="flex-1"><h3 class="font-oswald text-lg font-bold">' + content.title + '</h3>' +
             '<p class="text-zinc-500 text-sm">' + content.year + ' - ' + (content.type === 'movie' ? 'Filme' : 'S\u00E9rie') + ' - \u2605 ' + content.rating + '</p>' +
             (selectedContent.genres ? '<p class="text-zinc-400 text-xs mt-1">' + selectedContent.genres + '</p>' : '') +
@@ -2372,7 +2515,7 @@ async function generateTrailerBannerVideo() {
         if (nativeOut) {
             statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
                 '<span class="text-green-400 text-sm font-semibold">\u26A1 MP4 nativo (H.264 + AAC) — sem recompressão</span></div>' +
-                (compressFailMsg ? '<div class="text-center text-yellow-400 text-xs mb-2">\u26A0 ' + compressFailMsg + '</div>' : quality === 'social' ? '<div class="text-center text-yellow-400 text-xs mb-2">' + (/github\.io$/i.test(location.hostname) ? '\u2139\uFE0F MP4 nativo em alta qualidade (14 Mbps). O GitHub Pages n\u00E3o permite a compress\u00E3o avan\u00E7ada \u2014 veja no LEIA-ME como ativar.' : '\u26A0 Compress\u00E3o avan\u00E7ada indispon\u00EDvel neste servidor (faltam os cabe\u00E7alhos COOP/COEP). Veja o LEIA-ME.') + '</div>' : '') +
+                (compressFailMsg ? '<div class="text-center text-yellow-400 text-xs mb-2">\u26A0 ' + compressFailMsg + '</div>' : quality === 'social' ? hostingResultNoticeHtml() : '') +
                 '<div class="text-center text-zinc-300 text-xs">' +
                 '<span class="font-bold">' + finalSizeMB + ' MB</span> · Qualidade: ' + quality.toUpperCase() + ' · ' + resLabel + '</div>';
         } else if (compressed) {
@@ -2380,10 +2523,10 @@ async function generateTrailerBannerVideo() {
                 '<span class="text-green-400 text-sm font-semibold">\u2728 Convertido para MP4 (H.264 High Profile + AAC)</span></div>' +
                 '<div class="text-center text-zinc-300 text-xs">' +
                 'Original: ' + rawSizeMB + ' MB → Final: <span class="font-bold text-green-400">' + finalSizeMB + ' MB</span> ' +
-                '<span class="text-green-400">(-' + savedPct + '%)</span> · ' + resLabel + '</div>';
+                '<span class="' + (savedPct >= 0 ? 'text-green-400' : 'text-zinc-400') + '">(' + (savedPct >= 0 ? '-' + savedPct : '+' + Math.abs(savedPct)) + '%)</span> · ' + resLabel + '</div>';
         } else {
             statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
-                '<span class="text-yellow-400 text-xs">\u26A0 Sem conversão disponível - vídeo original</span></div>' +
+                '<span class="text-sky-300 text-xs">\u2139\uFE0F V\u00EDdeo original entregue. ' + hostingNoCompressionNote() + '.' + hostingLinkHtml() + '</span></div>' +
                 '<div class="text-center text-zinc-400 text-xs">' +
                 'Tamanho: ' + finalSizeMB + ' MB · Formato: ' + finalExt.toUpperCase() + ' · ' + resLabel + '</div>';
         }
@@ -2672,11 +2815,11 @@ async function loadCustomVideoMode() {
     } else if (ffmpegSupported()) {
         statusHtml = '<span class="text-green-400">\u2713 Convers\u00E3o WebM\u2192MP4 ativada</span>';
     } else {
-        statusHtml = '<span class="text-yellow-400">\u26A0 Sem convers\u00E3o - v\u00EDdeo sair\u00E1 em WebM</span>';
+        statusHtml = '<span class="text-yellow-400">' + hostingNoMp4Text() + '</span>';
     }
 
     controlPanel.innerHTML =
-        '<header class="border-b border-zinc-800 pb-5"><h2 class="font-oswald text-2xl font-bold text-blue-400">V\u00EDdeo com Texto Livre</h2><p class="text-zinc-500 text-sm mt-2">Carregue um v\u00EDdeo MP4 e escreva um texto personalizado — sem dados de filme</p><p class="text-xs mt-2">' + statusHtml + '</p></header>' +
+        '<header class="border-b border-zinc-800 pb-5"><h2 class="font-oswald text-2xl font-bold text-blue-400">V\u00EDdeo com Texto Livre</h2><p class="text-zinc-500 text-sm mt-2">Carregue um v\u00EDdeo MP4 e escreva um texto personalizado — sem dados de filme</p><p class="text-xs mt-2">' + statusHtml + '</p><p class="text-xs mt-1 text-zinc-500" data-testid="hosting-note">' + hostingPanelHtml() + '</p></header>' +
         '<div class="border-2 border-dashed border-blue-500/40 rounded-lg p-5 bg-blue-900/10">' +
             '<label class="text-xs uppercase tracking-widest text-blue-300 font-semibold block mb-3">V\u00EDdeo MP4 (do dispositivo)</label>' +
             '<label class="cursor-pointer flex flex-col items-center gap-2 hover:bg-blue-900/20 transition-colors p-4 rounded">' +
@@ -3113,7 +3256,7 @@ async function generateCustomTrailerBannerVideo() {
         if (nativeOut) {
             statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
                 '<span class="text-green-400 text-sm font-semibold">\u26A1 MP4 nativo (H.264 + AAC) — sem recompressão</span></div>' +
-                (compressFailMsg ? '<div class="text-center text-yellow-400 text-xs mb-2">\u26A0 ' + compressFailMsg + '</div>' : quality === 'social' ? '<div class="text-center text-yellow-400 text-xs mb-2">' + (/github\.io$/i.test(location.hostname) ? '\u2139\uFE0F MP4 nativo em alta qualidade (14 Mbps). O GitHub Pages n\u00E3o permite a compress\u00E3o avan\u00E7ada \u2014 veja no LEIA-ME como ativar.' : '\u26A0 Compress\u00E3o avan\u00E7ada indispon\u00EDvel neste servidor (faltam os cabe\u00E7alhos COOP/COEP). Veja o LEIA-ME.') + '</div>' : '') +
+                (compressFailMsg ? '<div class="text-center text-yellow-400 text-xs mb-2">\u26A0 ' + compressFailMsg + '</div>' : quality === 'social' ? hostingResultNoticeHtml() : '') +
                 '<div class="text-center text-zinc-300 text-xs">' +
                 '<span class="font-bold">' + finalSizeMB + ' MB</span> · Qualidade: ' + quality.toUpperCase() + ' · ' + resLabel + '</div>';
         } else if (compressed) {
@@ -3121,10 +3264,10 @@ async function generateCustomTrailerBannerVideo() {
                 '<span class="text-green-400 text-sm font-semibold">\u2728 Convertido para MP4 (H.264 High Profile + AAC)</span></div>' +
                 '<div class="text-center text-zinc-300 text-xs">' +
                 'Original: ' + rawSizeMB + ' MB → Final: <span class="font-bold text-green-400">' + finalSizeMB + ' MB</span> ' +
-                '<span class="text-green-400">(-' + savedPct + '%)</span> · ' + resLabel + '</div>';
+                '<span class="' + (savedPct >= 0 ? 'text-green-400' : 'text-zinc-400') + '">(' + (savedPct >= 0 ? '-' + savedPct : '+' + Math.abs(savedPct)) + '%)</span> · ' + resLabel + '</div>';
         } else {
             statusHtml2 = '<div class="flex items-center justify-center gap-2 mb-2">' +
-                '<span class="text-yellow-400 text-xs">\u26A0 Sem conversão disponível - vídeo original</span></div>' +
+                '<span class="text-sky-300 text-xs">\u2139\uFE0F V\u00EDdeo original entregue. ' + hostingNoCompressionNote() + '.' + hostingLinkHtml() + '</span></div>' +
                 '<div class="text-center text-zinc-400 text-xs">' +
                 'Tamanho: ' + finalSizeMB + ' MB · Formato: ' + finalExt.toUpperCase() + ' · ' + resLabel + '</div>';
         }
@@ -3328,7 +3471,7 @@ async function loadPosterOptions(content, containerId, previewId, onChange) {
             list.forEach(function(p) {
                 var selected = content.posterPath === p.file_path;
                 html += '<button type="button" data-path="' + p.file_path + '" class="flex-shrink-0 rounded overflow-hidden border-2 ' + (selected ? 'border-red-500' : 'border-zinc-700 hover:border-zinc-400') + '" style="width:72px">' +
-                        '<img crossorigin="anonymous" src="' + TMDB_IMG_BASE + '/w185' + p.file_path + '" loading="lazy" class="w-full block" style="aspect-ratio:2/3;object-fit:cover" alt="capa"></button>';
+                        '<img crossorigin="anonymous" onerror="bgpImgFallback(this)" src="' + TMDB_IMG_BASE + '/w185' + p.file_path + '" loading="lazy" class="w-full block" style="aspect-ratio:2/3;object-fit:cover" alt="capa"></button>';
             });
             html += '</div>';
         }
@@ -3351,7 +3494,7 @@ async function loadPosterOptions(content, containerId, previewId, onChange) {
             content.poster = url;
             content.posterPath = path;
             var preview = document.getElementById(previewId);
-            if (preview) { preview.src = url; preview.classList.remove('hidden'); }
+            if (preview) { preview.removeAttribute('data-failed'); preview.style.visibility = ''; preview.src = url; preview.classList.remove('hidden'); }
             render();
             if (typeof onChange === 'function') onChange();
         } catch (e) {
@@ -3401,3 +3544,4 @@ function wrapText(ctx, text, maxWidth) {
 // Init
 loadGlobalSettings();
 detectBackend();
+renderHostingInfo();
